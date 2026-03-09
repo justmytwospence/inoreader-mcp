@@ -97,6 +97,124 @@ export function registerSubscriptionTools(server: McpServer): void {
   );
 
   server.tool(
+    "get_uncategorized_feeds",
+    "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.",
+    {
+      include_url: z
+        .boolean()
+        .optional()
+        .describe("Include site URL as a third tuple element (default false)"),
+    },
+    async (params) => {
+      const data = await apiGet<SubscriptionListResponse>(
+        "/reader/api/0/subscription/list",
+        { output: "json" }
+      );
+
+      const uncategorized = data.subscriptions.filter(
+        (s) => s.categories.length === 0
+      );
+
+      const feeds = uncategorized.map((s) =>
+        params.include_url
+          ? [s.id, s.title, s.htmlUrl]
+          : [s.id, s.title]
+      );
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                uncategorized_count: uncategorized.length,
+                total_count: data.subscriptions.length,
+                feeds,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "categorize_feeds",
+    "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Each feed assignment costs 1 Zone 2 request.",
+    {
+      assignments: z
+        .record(
+          z.string(),
+          z.array(z.string())
+        )
+        .describe("Map of folder name to array of stream IDs to assign"),
+    },
+    async (params) => {
+      const pairs: { streamId: string; folder: string }[] = [];
+      for (const [folder, streamIds] of Object.entries(params.assignments)) {
+        for (const streamId of streamIds) {
+          pairs.push({ streamId, folder });
+        }
+      }
+
+      const results: { streamId: string; folder: string; ok: boolean; error?: string }[] = [];
+      const concurrency = 10;
+
+      for (let i = 0; i < pairs.length; i += concurrency) {
+        const batch = pairs.slice(i, i + concurrency);
+        const batchResults = await Promise.all(
+          batch.map(async ({ streamId, folder }) => {
+            try {
+              await apiPost<string>("/reader/api/0/subscription/edit", {
+                ac: "edit",
+                s: streamId,
+                a: `user/-/label/${folder}`,
+              });
+              return { streamId, folder, ok: true as const };
+            } catch (e) {
+              return {
+                streamId,
+                folder,
+                ok: false as const,
+                error: e instanceof Error ? e.message : String(e),
+              };
+            }
+          })
+        );
+        results.push(...batchResults);
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok).length;
+      const byFolder: Record<string, number> = {};
+      for (const [folder, streamIds] of Object.entries(params.assignments)) {
+        byFolder[folder] = streamIds.length;
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                total: pairs.length,
+                succeeded,
+                failed,
+                by_folder: byFolder,
+                errors: failed > 0 ? results.filter((r) => !r.ok) : undefined,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     "manage_subscription",
     "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request.",
     {

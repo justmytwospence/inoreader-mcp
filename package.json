@@ -1,0 +1,36 @@
+{
+  "name": "inoreader-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Inoreader RSS reader API. Analyze feed health, triage articles, and manage subscriptions from Claude.",
+  "type": "module",
+  "bin": {
+    "inoreader-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "inoreader",
+    "rss",
+    "model-context-protocol",
+    "claude"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/inoreader-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}

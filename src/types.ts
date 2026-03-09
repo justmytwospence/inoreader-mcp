@@ -62,6 +62,10 @@ export interface StreamItemIdsResponse {
   continuation?: string;
 }
 
+export interface StreamItemContentsResponse {
+  items: ArticleItem[];
+}
+
 export interface TagListResponse {
   tags: Array<{ id: string; sortid?: string; type?: string }>;
 }

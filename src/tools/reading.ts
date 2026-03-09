@@ -1,10 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { apiGet } from "../api.js";
+import { apiGet, apiPost } from "../api.js";
 import type {
   UnreadCountResponse,
   StreamContentsResponse,
   StreamItemIdsResponse,
+  StreamItemContentsResponse,
   ArticleItem,
 } from "../types.js";
 
@@ -205,6 +206,108 @@ export function registerReadingTools(server: McpServer): void {
               null,
               2
             ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "search_articles",
+    "Search for articles by keyword across all feeds. Costs 1 Zone 1 request per page. Uses undocumented but stable search endpoint.",
+    {
+      query: z.string().describe("Search query string"),
+      count: z
+        .number()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Number of results to return (1-100, default 20)"),
+      since: z
+        .string()
+        .optional()
+        .describe("ISO date string - only return articles published after this date"),
+      continuation: z
+        .string()
+        .optional()
+        .describe("Continuation token for pagination (from previous response)"),
+    },
+    async (params) => {
+      const queryParams: Record<string, string> = {
+        output: "json",
+        n: String(params.count ?? 20),
+        q: params.query,
+      };
+
+      if (params.continuation) queryParams.c = params.continuation;
+      if (params.since) {
+        queryParams.ot = String(
+          Math.floor(new Date(params.since).getTime() / 1000)
+        );
+      }
+
+      const data = await apiGet<StreamContentsResponse>(
+        "/reader/api/0/stream/contents/user/-/state/com.google/search",
+        queryParams
+      );
+
+      const result = {
+        articles: data.items.map(formatArticle),
+        continuation: data.continuation ?? null,
+        total_returned: data.items.length,
+      };
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "get_article_content",
+    "Get full HTML content for specific articles by ID. Use after get_articles or search_articles to read full content. Costs 1 Zone 1 request.",
+    {
+      article_ids: z
+        .array(z.string())
+        .min(1)
+        .max(20)
+        .describe("Article IDs to fetch full content for (max 20)"),
+    },
+    async (params) => {
+      const searchParams = new URLSearchParams();
+      for (const id of params.article_ids) {
+        searchParams.append("i", id);
+      }
+
+      const data = await apiPost<StreamItemContentsResponse>(
+        "/reader/api/0/stream/items/contents",
+        searchParams
+      );
+
+      const articles = data.items.map((item) => {
+        const url =
+          item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? "";
+        return {
+          id: item.id,
+          title: item.title,
+          url,
+          author: item.author ?? "",
+          published: new Date(item.published * 1000).toISOString(),
+          source: item.origin?.title ?? "",
+          content: item.summary?.content ?? "",
+        };
+      });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(articles, null, 2),
           },
         ],
       };

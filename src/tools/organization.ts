@@ -17,7 +17,7 @@ function resolveTag(tag: string): string {
 export function registerOrganizationTools(server: McpServer): void {
   server.tool(
     "manage_tags",
-    "Mark articles as read/unread/starred, or apply/remove custom tags. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', or any custom label name. Costs 1 Zone 2 request.",
+    "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', or any custom label name. Costs 1 Zone 2 request.",
     {
       article_ids: z
         .array(z.string())

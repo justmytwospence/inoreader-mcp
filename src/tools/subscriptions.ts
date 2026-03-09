@@ -3,7 +3,52 @@ import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
 import type { SubscriptionListResponse } from "../types.js";
 
+const BatchEditSchema = z.array(
+  z.object({
+    stream_id: z.string().describe("Stream ID of the feed"),
+    add_to_folder: z.string().describe("Folder name to add the feed to"),
+  })
+);
+
 export function registerSubscriptionTools(server: McpServer): void {
+  server.tool(
+    "batch_edit_subscriptions",
+    "Add multiple feeds to folders in one call. Each edit costs 1 Zone 2 request. Pass an array of {stream_id, add_to_folder} objects.",
+    {
+      edits: BatchEditSchema.describe("Array of edits to apply"),
+    },
+    async (params) => {
+      const results: { stream_id: string; folder: string; ok: boolean; error?: string }[] = [];
+      for (const edit of params.edits) {
+        try {
+          await apiPost<string>("/reader/api/0/subscription/edit", {
+            ac: "edit",
+            s: edit.stream_id,
+            a: `user/-/label/${edit.add_to_folder}`,
+          });
+          results.push({ stream_id: edit.stream_id, folder: edit.add_to_folder, ok: true });
+        } catch (e) {
+          results.push({
+            stream_id: edit.stream_id,
+            folder: edit.add_to_folder,
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      const succeeded = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok).length;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ succeeded, failed, details: failed > 0 ? results.filter((r) => !r.ok) : undefined }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   server.tool(
     "list_subscriptions",
     "List all RSS feed subscriptions with their folders, URLs, and metadata. Costs 1 Zone 1 request.",

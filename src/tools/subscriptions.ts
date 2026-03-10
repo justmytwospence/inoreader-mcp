@@ -215,6 +215,82 @@ export function registerSubscriptionTools(server: McpServer): void {
   );
 
   server.tool(
+    "reassign_feeds",
+    "Move feeds from one folder to another in bulk. Each feed costs 1 Zone 2 request (the add and remove happen in a single API call). Pass from_folder and a map of {new_folder: [stream_id, ...]}.",
+    {
+      from_folder: z
+        .string()
+        .describe("Folder name to remove all feeds from"),
+      assignments: z
+        .record(z.string(), z.array(z.string()))
+        .describe("Map of new folder name to array of stream IDs to move there"),
+    },
+    async (params) => {
+      const pairs: { streamId: string; toFolder: string }[] = [];
+      for (const [toFolder, streamIds] of Object.entries(params.assignments)) {
+        for (const streamId of streamIds) {
+          pairs.push({ streamId, toFolder });
+        }
+      }
+
+      const results: { streamId: string; toFolder: string; ok: boolean; error?: string }[] = [];
+      const concurrency = 10;
+
+      for (let i = 0; i < pairs.length; i += concurrency) {
+        const batch = pairs.slice(i, i + concurrency);
+        const batchResults = await Promise.all(
+          batch.map(async ({ streamId, toFolder }) => {
+            try {
+              await apiPost<string>("/reader/api/0/subscription/edit", {
+                ac: "edit",
+                s: streamId,
+                a: `user/-/label/${toFolder}`,
+                r: `user/-/label/${params.from_folder}`,
+              });
+              return { streamId, toFolder, ok: true as const };
+            } catch (e) {
+              return {
+                streamId,
+                toFolder,
+                ok: false as const,
+                error: e instanceof Error ? e.message : String(e),
+              };
+            }
+          })
+        );
+        results.push(...batchResults);
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok).length;
+      const byFolder: Record<string, number> = {};
+      for (const [folder, streamIds] of Object.entries(params.assignments)) {
+        byFolder[folder] = streamIds.length;
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                from_folder: params.from_folder,
+                total: pairs.length,
+                succeeded,
+                failed,
+                by_folder: byFolder,
+                errors: failed > 0 ? results.filter((r) => !r.ok) : undefined,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
     "manage_subscription",
     "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request.",
     {

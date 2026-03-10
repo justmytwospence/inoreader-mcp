@@ -7,13 +7,14 @@ import type {
   UnreadCountResponse,
   StreamContentsResponse,
   StreamItemIdsResponse,
+  TagListResponse,
   UserInfoResponse,
 } from "../types.js";
 
 export function registerAnalyticsTools(server: McpServer): void {
   server.tool(
     "analyze_feeds",
-    "Analyze feed health and engagement using a Beta-Binomial Bayesian model. Computes engagement_rate as the posterior mean of saved/total per feed, with an empirical Bayes prior estimated from the global save rate. This shrinks small-sample feeds toward the global mean, preventing feeds with 1/1 saves from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Results are cached for 1 hour. Costs 2 + starred_pages + engaged_feed_count Zone 1 requests on first call, 0 on subsequent cached calls.",
+    "Analyze feed health and engagement using a Beta-Binomial Bayesian model. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated from the global engagement rate. This shrinks small-sample feeds toward the global mean, preventing feeds with 1/1 engaged from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Results are cached for 1 hour. Costs 3 + engagement_pages + engaged_feed_count Zone 1 requests on first call, 0 on subsequent cached calls.",
     {
       folder: z
         .string()
@@ -26,7 +27,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         .optional()
         .describe("Time window in months to analyze (default 3)"),
       sort_by: z
-        .enum(["engagement_rate", "credible_lower", "saved_count", "title", "days_since_newest"])
+        .enum(["engagement_rate", "credible_lower", "engaged_count", "title", "days_since_newest"])
         .optional()
         .describe("Sort results by (default: engagement_rate). Use credible_lower for conservative ranking that penalizes small samples more."),
       prior_strength: z
@@ -35,12 +36,12 @@ export function registerAnalyticsTools(server: McpServer): void {
         .max(100)
         .optional()
         .describe("Beta prior pseudo-observation count (default 10). Higher values shrink small-sample feeds more aggressively toward the global mean."),
-      starred_pages: z
+      engagement_pages: z
         .number()
         .min(1)
         .max(20)
         .optional()
-        .describe("Max pages of saved/starred articles to fetch (100 per page, default 10). More pages = better engagement data but higher API cost."),
+        .describe("Max total pages of engaged articles to fetch across all engagement tags (100 per page, default 10). More pages = better data but higher API cost."),
       limit: z
         .number()
         .min(1)
@@ -60,52 +61,92 @@ export function registerAnalyticsTools(server: McpServer): void {
         Math.floor((Date.now() - monthsBack * 30 * 24 * 60 * 60 * 1000) / 1000)
       );
 
-      // Fetch subscriptions and unread counts in parallel (2 Z1)
-      const [subData, unreadData] = await Promise.all([
+      // Fetch subscriptions, unread counts, and tags in parallel (3 Z1)
+      const [subData, unreadData, tagData] = await Promise.all([
         apiGet<SubscriptionListResponse>("/reader/api/0/subscription/list", {
           output: "json",
         }),
         apiGet<UnreadCountResponse>("/reader/api/0/unread-count", {
           output: "json",
         }),
+        apiGet<TagListResponse>("/reader/api/0/tag/list", {
+          output: "json",
+        }),
       ]);
 
-      // Fetch saved/starred articles within the time window to build engagement map
-      const savedCountByFeed = new Map<string, number>();
-      const maxPages = params.starred_pages ?? 10;
-      let continuation: string | undefined;
-      let totalSaved = 0;
-      let z1Cost = 2; // subscriptions + unread counts
-
-      for (let page = 0; page < maxPages; page++) {
-        const queryParams: Record<string, string> = {
-          output: "json",
-          n: "100",
-          ot: sinceTimestamp,
-        };
-        if (continuation) queryParams.c = continuation;
-
-        const saved = await apiGet<StreamContentsResponse>(
-          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/starred")}`,
-          queryParams
-        );
-        z1Cost++;
-
-        for (const item of saved.items) {
-          const feedId = item.origin?.streamId;
-          if (feedId) {
-            savedCountByFeed.set(feedId, (savedCountByFeed.get(feedId) ?? 0) + 1);
-          }
+      // Determine which tags represent engagement (not folders or passive states)
+      const folderIds = new Set<string>();
+      for (const sub of subData.subscriptions) {
+        for (const cat of sub.categories) {
+          folderIds.add(cat.id);
         }
-        totalSaved += saved.items.length;
+      }
+      const excludedSuffixes = [
+        "state/com.google/read",
+        "state/com.google/reading-list",
+        "state/com.google/tracking-body-link-used",
+        "state/com.google/tracking-emailed",
+        "state/com.google/tracking-item-link-used",
+        "state/com.google/tracking-kept-unread",
+      ];
+      const engagementTagIds = tagData.tags
+        .map((t) => t.id)
+        .filter((id) => {
+          if (folderIds.has(id)) return false;
+          if (excludedSuffixes.some((suffix) => id.endsWith(suffix))) return false;
+          return true;
+        });
 
-        if (!saved.continuation) break;
-        continuation = saved.continuation;
+      // Fetch engaged articles across all engagement tags with deduplication
+      const engagedCountByFeed = new Map<string, number>();
+      const seenArticleIds = new Set<string>();
+      const maxPages = params.engagement_pages ?? 10;
+      let totalEngaged = 0;
+      let pagesUsed = 0;
+      let z1Cost = 3; // subscriptions + unread counts + tag list
+
+      for (const tagId of engagementTagIds) {
+        if (pagesUsed >= maxPages) break;
+        let continuation: string | undefined;
+
+        while (pagesUsed < maxPages) {
+          const queryParams: Record<string, string> = {
+            output: "json",
+            n: "100",
+            ot: sinceTimestamp,
+          };
+          if (continuation) queryParams.c = continuation;
+
+          let data: StreamContentsResponse;
+          try {
+            data = await apiGet<StreamContentsResponse>(
+              `/reader/api/0/stream/contents/${encodeURIComponent(tagId)}`,
+              queryParams
+            );
+          } catch {
+            break; // Tag stream not fetchable, skip it
+          }
+          pagesUsed++;
+          z1Cost++;
+
+          for (const item of data.items) {
+            if (seenArticleIds.has(item.id)) continue;
+            seenArticleIds.add(item.id);
+            const feedId = item.origin?.streamId;
+            if (feedId) {
+              engagedCountByFeed.set(feedId, (engagedCountByFeed.get(feedId) ?? 0) + 1);
+              totalEngaged++;
+            }
+          }
+
+          if (!data.continuation) break;
+          continuation = data.continuation;
+        }
       }
 
       // For feeds with engagement, fetch total article count in the same window
       const totalArticlesByFeed = new Map<string, number>();
-      const engagedFeedIds = [...savedCountByFeed.keys()];
+      const engagedFeedIds = [...engagedCountByFeed.keys()];
 
       const sinceTimestampUsec = BigInt(sinceTimestamp) * 1_000_000n;
 
@@ -147,16 +188,16 @@ export function registerAnalyticsTools(server: McpServer): void {
 
       // Compute empirical Bayes Beta prior from all engaged feeds
       const priorStrength = params.prior_strength ?? 10;
-      let globalSaved = 0;
+      let globalEngaged = 0;
       let globalTotal = 0;
       for (const feedId of engagedFeedIds) {
         const total = totalArticlesByFeed.get(feedId);
         if (total !== undefined) {
-          globalSaved += savedCountByFeed.get(feedId) ?? 0;
+          globalEngaged += engagedCountByFeed.get(feedId) ?? 0;
           globalTotal += total;
         }
       }
-      const globalRate = globalTotal > 0 ? globalSaved / globalTotal : 0;
+      const globalRate = globalTotal > 0 ? globalEngaged / globalTotal : 0;
       const alpha = globalRate * priorStrength;
       const beta = (1 - globalRate) * priorStrength;
 
@@ -168,23 +209,23 @@ export function registerAnalyticsTools(server: McpServer): void {
         const daysSinceNewest = unread?.newestItemTimestamp
           ? (Date.now() - unread.newestItemTimestamp) / (1000 * 60 * 60 * 24)
           : null;
-        const savedCount = savedCountByFeed.get(sub.id) ?? 0;
+        const engagedCount = engagedCountByFeed.get(sub.id) ?? 0;
         const totalArticles = totalArticlesByFeed.get(sub.id) ?? null;
 
         // Beta-Binomial posterior mean
         let engagementRate: number | null;
         let credibleLower: number | null;
-        if (savedCount > 0 && totalArticles !== null && totalArticles > 0) {
+        if (engagedCount > 0 && totalArticles !== null && totalArticles > 0) {
           const n = totalArticles;
-          const posteriorAlpha = alpha + savedCount;
-          const posteriorBeta = beta + n - savedCount;
+          const posteriorAlpha = alpha + engagedCount;
+          const posteriorBeta = beta + n - engagedCount;
           const posteriorN = posteriorAlpha + posteriorBeta;
           engagementRate = posteriorAlpha / posteriorN;
           // Normal approximation to 90% credible interval lower bound
           const variance = (posteriorAlpha * posteriorBeta) / (posteriorN * posteriorN * (posteriorN + 1));
           credibleLower = Math.max(0, engagementRate - 1.645 * Math.sqrt(variance));
-        } else if (savedCount > 0) {
-          // Saved articles exist but total count fetch failed
+        } else if (engagedCount > 0) {
+          // Engaged articles exist but total count fetch failed
           engagementRate = null;
           credibleLower = null;
         } else {
@@ -197,7 +238,7 @@ export function registerAnalyticsTools(server: McpServer): void {
           status = "dormant";
         } else if (engagementRate !== null && engagementRate > 0.1) {
           status = "high-engagement";
-        } else if (savedCount > 0) {
+        } else if (engagedCount > 0) {
           status = "moderate-engagement";
         } else {
           status = "never-engaged";
@@ -207,7 +248,7 @@ export function registerAnalyticsTools(server: McpServer): void {
           title: sub.title,
           id: sub.id,
           folders: sub.categories.map((c) => c.label),
-          saved_count: savedCount,
+          engaged_count: engagedCount,
           total_articles: totalArticles,
           engagement_rate: engagementRate !== null ? Math.round(engagementRate * 10000) / 10000 : null,
           credible_lower: credibleLower !== null ? Math.round(credibleLower * 10000) / 10000 : null,
@@ -230,8 +271,8 @@ export function registerAnalyticsTools(server: McpServer): void {
         feeds.sort((a, b) => (b.engagement_rate ?? -1) - (a.engagement_rate ?? -1));
       } else if (sortBy === "credible_lower") {
         feeds.sort((a, b) => (b.credible_lower ?? -1) - (a.credible_lower ?? -1));
-      } else if (sortBy === "saved_count") {
-        feeds.sort((a, b) => b.saved_count - a.saved_count);
+      } else if (sortBy === "engaged_count") {
+        feeds.sort((a, b) => b.engaged_count - a.engaged_count);
       } else if (sortBy === "days_since_newest") {
         feeds.sort((a, b) => (b.days_since_newest ?? 9999) - (a.days_since_newest ?? 9999));
       } else {
@@ -245,8 +286,10 @@ export function registerAnalyticsTools(server: McpServer): void {
         never_engaged: feeds.filter((f) => f.status === "never-engaged").length,
         dormant: feeds.filter((f) => f.status === "dormant").length,
         window_months: monthsBack,
-        saved_articles_scanned: totalSaved,
-        has_more_saved: continuation !== undefined,
+        engaged_articles_scanned: totalEngaged,
+        has_more_engaged: pagesUsed >= maxPages,
+        engagement_tags_used: engagementTagIds.length,
+        engagement_tag_ids: engagementTagIds,
         api_cost_z1: z1Cost,
         prior: {
           alpha: Math.round(alpha * 1000) / 1000,

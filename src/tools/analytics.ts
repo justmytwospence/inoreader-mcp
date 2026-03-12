@@ -14,7 +14,7 @@ import type {
 export function registerAnalyticsTools(server: McpServer): void {
   server.tool(
     "analyze_feeds",
-    "Analyze feed health and engagement using a Beta-Binomial Bayesian model. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated from the global engagement rate. This shrinks small-sample feeds toward the global mean, preventing feeds with 1/1 engaged from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Results are cached for 1 hour. Costs 3 + engagement_pages + engaged_feed_count Zone 1 requests on first call, 0 on subsequent cached calls.",
+    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + engagement_pages + engaged_feed_count Zone 1 requests on first call, 0 on subsequent cached calls.",
     {
       folder: z
         .string()
@@ -186,7 +186,16 @@ export function registerAnalyticsTools(server: McpServer): void {
         ])
       );
 
-      // Compute empirical Bayes Beta prior from all engaged feeds
+      // Build category -> feed IDs mapping (feeds appear in ALL their categories)
+      const categoryFeedIds = new Map<string, string[]>();
+      for (const sub of subData.subscriptions) {
+        for (const cat of sub.categories) {
+          if (!categoryFeedIds.has(cat.label)) categoryFeedIds.set(cat.label, []);
+          categoryFeedIds.get(cat.label)!.push(sub.id);
+        }
+      }
+
+      // Compute global empirical Bayes prior (fallback)
       const priorStrength = params.prior_strength ?? 10;
       let globalEngaged = 0;
       let globalTotal = 0;
@@ -198,8 +207,65 @@ export function registerAnalyticsTools(server: McpServer): void {
         }
       }
       const globalRate = globalTotal > 0 ? globalEngaged / globalTotal : 0;
-      const alpha = globalRate * priorStrength;
-      const beta = (1 - globalRate) * priorStrength;
+      const globalAlpha = globalRate * priorStrength;
+      const globalBeta = (1 - globalRate) * priorStrength;
+
+      // Compute per-category priors (categories with >= 2 engaged feeds)
+      const minCategoryFeeds = 2;
+      const categoryPriors = new Map<string, { alpha: number; beta: number; rate: number; fallback: boolean }>();
+      const fallbackCategories: string[] = [];
+
+      for (const [category, feedIds] of categoryFeedIds) {
+        let catEngaged = 0;
+        let catTotal = 0;
+        let engagedFeedCount = 0;
+        for (const fid of feedIds) {
+          const eng = engagedCountByFeed.get(fid);
+          const tot = totalArticlesByFeed.get(fid);
+          if (eng !== undefined && eng > 0 && tot !== undefined) {
+            catEngaged += eng;
+            catTotal += tot;
+            engagedFeedCount++;
+          }
+        }
+        if (engagedFeedCount >= minCategoryFeeds && catTotal > 0) {
+          const rate = catEngaged / catTotal;
+          categoryPriors.set(category, {
+            alpha: rate * priorStrength,
+            beta: (1 - rate) * priorStrength,
+            rate,
+            fallback: false,
+          });
+        } else {
+          categoryPriors.set(category, {
+            alpha: globalAlpha,
+            beta: globalBeta,
+            rate: globalRate,
+            fallback: true,
+          });
+          fallbackCategories.push(category);
+        }
+      }
+
+      // Resolve per-feed prior by averaging across all the feed's categories
+      const feedPriors = new Map<string, { alpha: number; beta: number }>();
+      for (const sub of subData.subscriptions) {
+        if (sub.categories.length === 0) {
+          feedPriors.set(sub.id, { alpha: globalAlpha, beta: globalBeta });
+          continue;
+        }
+        const priors = sub.categories
+          .map((c) => categoryPriors.get(c.label))
+          .filter((p): p is NonNullable<typeof p> => p !== undefined);
+        if (priors.length === 0) {
+          feedPriors.set(sub.id, { alpha: globalAlpha, beta: globalBeta });
+        } else {
+          feedPriors.set(sub.id, {
+            alpha: priors.reduce((sum, p) => sum + p.alpha, 0) / priors.length,
+            beta: priors.reduce((sum, p) => sum + p.beta, 0) / priors.length,
+          });
+        }
+      }
 
       let feeds = subData.subscriptions.map((sub) => {
         const unread = unreadMap.get(sub.id);
@@ -212,13 +278,14 @@ export function registerAnalyticsTools(server: McpServer): void {
         const engagedCount = engagedCountByFeed.get(sub.id) ?? 0;
         const totalArticles = totalArticlesByFeed.get(sub.id) ?? null;
 
-        // Beta-Binomial posterior mean
+        // Beta-Binomial posterior mean (using category-averaged prior)
+        const prior = feedPriors.get(sub.id) ?? { alpha: globalAlpha, beta: globalBeta };
         let engagementRate: number | null;
         let credibleLower: number | null;
         if (engagedCount > 0 && totalArticles !== null && totalArticles > 0) {
           const n = totalArticles;
-          const posteriorAlpha = alpha + engagedCount;
-          const posteriorBeta = beta + n - engagedCount;
+          const posteriorAlpha = prior.alpha + engagedCount;
+          const posteriorBeta = prior.beta + n - engagedCount;
           const posteriorN = posteriorAlpha + posteriorBeta;
           engagementRate = posteriorAlpha / posteriorN;
           // Normal approximation to 90% credible interval lower bound
@@ -292,10 +359,22 @@ export function registerAnalyticsTools(server: McpServer): void {
         engagement_tag_ids: engagementTagIds,
         api_cost_z1: z1Cost,
         prior: {
-          alpha: Math.round(alpha * 1000) / 1000,
-          beta: Math.round(beta * 1000) / 1000,
-          global_rate: Math.round(globalRate * 10000) / 10000,
           strength: priorStrength,
+          global_fallback: {
+            alpha: Math.round(globalAlpha * 1000) / 1000,
+            beta: Math.round(globalBeta * 1000) / 1000,
+            rate: Math.round(globalRate * 10000) / 10000,
+          },
+          by_category: Object.fromEntries(
+            [...categoryPriors.entries()]
+              .filter(([, v]) => !v.fallback)
+              .map(([k, v]) => [k, {
+                alpha: Math.round(v.alpha * 1000) / 1000,
+                beta: Math.round(v.beta * 1000) / 1000,
+                rate: Math.round(v.rate * 10000) / 10000,
+              }])
+          ),
+          fallback_categories: fallbackCategories,
         },
       };
 

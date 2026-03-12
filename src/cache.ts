@@ -1,4 +1,4 @@
-const DEFAULT_TTL_MS = 3600_000; // 1 hour
+const DEFAULT_TTL_MS = Infinity; // no expiry; cleared on analyze_feeds refresh or any write
 
 interface CacheEntry {
   data: unknown;

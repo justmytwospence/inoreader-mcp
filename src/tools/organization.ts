@@ -8,6 +8,7 @@ const SYSTEM_TAGS: Record<string, string> = {
   starred: "user/-/state/com.google/starred",
   like: "user/-/state/com.google/like",
   broadcast: "user/-/state/com.google/broadcast",
+  "saved-web-pages": "user/-/state/com.google/saved-web-pages",
 };
 
 function resolveTag(tag: string): string {
@@ -17,7 +18,7 @@ function resolveTag(tag: string): string {
 export function registerOrganizationTools(server: McpServer): void {
   server.tool(
     "manage_tags",
-    "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', or any custom label name. Costs 1 Zone 2 request.",
+    "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. To save/unsave a web page: add/remove_tag='saved-web-pages'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', 'saved-web-pages', or any custom label name. Costs 1 Zone 2 request.",
     {
       article_ids: z
         .array(z.string())
@@ -99,6 +100,36 @@ export function registerOrganizationTools(server: McpServer): void {
           {
             type: "text" as const,
             text: `Marked all items in ${params.stream_id} as read`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "remove_saved_web_pages",
+    "Remove saved web pages by article ID. Use get_saved_web_pages with filter 'unstarred' to find candidates. IMPORTANT: Always present the candidate list to the user for review before removing -- some unstarred pages may be valuable references or tools worth keeping bookmarked. Only remove pages the user has explicitly confirmed. Costs 1 Zone 2 request.",
+    {
+      article_ids: z
+        .array(z.string())
+        .min(1)
+        .max(50)
+        .describe("Article IDs of saved web pages to remove"),
+    },
+    async (params) => {
+      const searchParams = new URLSearchParams();
+      for (const id of params.article_ids) {
+        searchParams.append("i", id);
+      }
+      searchParams.append("r", "user/-/state/com.google/saved-web-pages");
+
+      await apiPost<string>("/reader/api/0/edit-tag", searchParams);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Removed ${params.article_ids.length} saved web page(s)`,
           },
         ],
       };

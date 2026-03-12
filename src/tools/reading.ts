@@ -77,7 +77,7 @@ export function registerReadingTools(server: McpServer): void {
         .string()
         .optional()
         .describe(
-          'Stream ID: feed URL (feed/http://...), folder (user/-/label/Name), or system stream (user/-/state/com.google/starred). Defaults to all items.'
+          'Stream ID: feed URL (feed/http://...), folder (user/-/label/Name), system stream (user/-/state/com.google/starred), or saved web pages (user/-/state/com.google/saved-web-pages). Defaults to all items.'
         ),
       count: z
         .number()
@@ -253,6 +253,60 @@ export function registerReadingTools(server: McpServer): void {
 
       const result = {
         articles: data.items.map(formatArticle),
+        continuation: data.continuation ?? null,
+        total_returned: data.items.length,
+      };
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "get_saved_web_pages",
+    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering by starred status to find pages that need cleanup. IMPORTANT: Always present unstarred pages to the user for review before removing any -- some may be valuable references or tools worth keeping. Costs 1 Zone 1 request per page.",
+    {
+      filter: z
+        .enum(["all", "starred", "unstarred"])
+        .optional()
+        .describe("Filter by starred status (default: all). Use 'unstarred' to find cleanup candidates."),
+      count: z
+        .number()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Number of pages to fetch (1-100, default 100)"),
+      continuation: z
+        .string()
+        .optional()
+        .describe("Continuation token for pagination"),
+    },
+    async (params) => {
+      const queryParams: Record<string, string> = {
+        output: "json",
+        n: String(params.count ?? 100),
+      };
+
+      if (params.continuation) queryParams.c = params.continuation;
+      if (params.filter === "unstarred") {
+        queryParams.xt = "user/-/state/com.google/starred";
+      } else if (params.filter === "starred") {
+        queryParams.it = "user/-/state/com.google/starred";
+      }
+
+      const data = await apiGet<StreamContentsResponse>(
+        `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/saved-web-pages")}`,
+        queryParams
+      );
+
+      const result = {
+        pages: data.items.map(formatArticle),
         continuation: data.continuation ?? null,
         total_returned: data.items.length,
       };

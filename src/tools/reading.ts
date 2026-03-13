@@ -18,6 +18,7 @@ function formatArticle(item: ArticleItem) {
   const isStarred = item.categories.some((c) =>
     c.includes("state/com.google/starred")
   );
+  const isKept = item.categories.some((c) => c.endsWith("/label/keep"));
   const summary = item.summary?.content
     ? item.summary.content.replace(/<[^>]*>/g, "").slice(0, 300)
     : "";
@@ -32,6 +33,7 @@ function formatArticle(item: ArticleItem) {
     source_url: item.origin?.htmlUrl ?? "",
     is_read: isRead,
     is_starred: isStarred,
+    is_kept: isKept,
     summary,
   };
 }
@@ -270,12 +272,12 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_saved_web_pages",
-    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering by starred status to find pages that need cleanup. IMPORTANT: Always present unstarred pages to the user for review before removing any -- some may be valuable references or tools worth keeping. Costs 1 Zone 1 request per page.",
+    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'keep' (via manage_tags add_tag='keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Costs 1 Zone 1 request per page.",
     {
       filter: z
-        .enum(["all", "starred", "unstarred"])
+        .enum(["all", "starred", "unstarred", "removable"])
         .optional()
-        .describe("Filter by starred status (default: all). Use 'unstarred' to find cleanup candidates."),
+        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'keep' -- the best filter for cleanup. 'unstarred' excludes starred only."),
       count: z
         .number()
         .min(1)
@@ -294,21 +296,25 @@ export function registerReadingTools(server: McpServer): void {
       };
 
       if (params.continuation) queryParams.c = params.continuation;
-      if (params.filter === "unstarred") {
-        queryParams.xt = "user/-/state/com.google/starred";
-      } else if (params.filter === "starred") {
-        queryParams.it = "user/-/state/com.google/starred";
-      }
 
       const data = await apiGet<StreamContentsResponse>(
         `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/saved-web-pages")}`,
         queryParams
       );
 
+      let pages = data.items.map(formatArticle);
+      if (params.filter === "starred") {
+        pages = pages.filter((p) => p.is_starred);
+      } else if (params.filter === "unstarred") {
+        pages = pages.filter((p) => !p.is_starred);
+      } else if (params.filter === "removable") {
+        pages = pages.filter((p) => !p.is_kept && !p.is_starred);
+      }
+
       const result = {
-        pages: data.items.map(formatArticle),
+        pages,
         continuation: data.continuation ?? null,
-        total_returned: data.items.length,
+        total_returned: pages.length,
       };
 
       return {

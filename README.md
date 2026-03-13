@@ -43,22 +43,28 @@ On first use, ask Claude to call the `setup_auth` tool. It will give you an OAut
 
 ## Tools
 
-### Reading
+### API primitives
+
+Thin wrappers around individual Inoreader API endpoints.
+
+#### Reading
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_unread_counts` | Unread counts for all feeds/folders, sorted by count | 1 Z1 |
 | `get_articles` | Fetch articles with filters (stream, status, date range, pagination) | 1 Z1/page |
 | `get_article_ids` | Lightweight ID-only fetch for counting/batch ops | 1 Z1 |
+| `get_article_content` | Full HTML content for specific articles by ID | 1 Z1 |
+| `search_articles` | Keyword search across all feeds | 1 Z1/page |
 
-### Subscriptions
+#### Subscriptions
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `list_subscriptions` | All feeds with folders, URLs, metadata | 1 Z1 |
 | `manage_subscription` | Subscribe, edit (rename/move), or unsubscribe | 1 Z2 |
 
-### Organization
+#### Organization
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
@@ -66,13 +72,35 @@ On first use, ask Claude to call the `setup_auth` tool. It will give you an OAut
 | `mark_all_read` | Mark all items in a feed/folder as read | 1 Z2 |
 | `list_folders_and_tags` | All folders and tags with unread counts | 1 Z1 |
 
-### Analytics
+#### Account
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `analyze_feeds` | Feed health analysis -- flags high-noise and dormant feeds | 2 Z1 |
-| `get_rate_limit_status` | Check remaining API budget (uses cached headers) | 0 |
 | `get_user_info` | Authenticated user info | 1 Z1 |
+| `get_rate_limit_status` | Check remaining API budget (uses cached headers) | 0 |
+
+### Composite tools
+
+Higher-level workflows that combine multiple API calls or add client-side logic.
+
+#### Feed management
+
+| Tool | Description | API Cost |
+|------|-------------|----------|
+| `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
+| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map | 1 Z2/feed |
+| `reassign_feeds` | Move feeds between folders in bulk | 1 Z2/feed |
+| `batch_edit_subscriptions` | Add multiple feeds to folders in one call | 1 Z2/feed |
+| `analyze_feeds` | Bayesian feed health analysis with category-level priors | 3+ Z1 |
+
+#### Saved web pages
+
+| Tool | Description | API Cost |
+|------|-------------|----------|
+| `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged) | 1 Z1/page |
+| `remove_saved_web_pages` | Batch-remove saved pages by ID | 1 Z2 |
+
+The saved pages workflow supports a `keep` tag (via `manage_tags add_tag='keep'`) to protect pages from cleanup without starring them. Use `get_saved_web_pages` with `filter='removable'` to find pages that are neither starred nor kept.
 
 **Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Inoreader enforces ~100 requests/day per zone.
 

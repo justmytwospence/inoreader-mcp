@@ -272,7 +272,7 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_saved_web_pages",
-    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'keep' (via manage_tags add_tag='keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Costs 1 Zone 1 request per page.",
+    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'keep' (via manage_tags add_tag='keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Set count_only=true to get just the total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
     {
       filter: z
         .enum(["all", "starred", "unstarred", "removable"])
@@ -284,12 +284,33 @@ export function registerReadingTools(server: McpServer): void {
         .max(100)
         .optional()
         .describe("Number of pages to fetch (1-100, default 100)"),
+      count_only: z
+        .boolean()
+        .optional()
+        .describe("Return only the total count, not page details (default false). Uses lightweight IDs endpoint."),
       continuation: z
         .string()
         .optional()
         .describe("Continuation token for pagination"),
     },
     async (params) => {
+      const streamId = "user/-/state/com.google/saved-web-pages";
+
+      if (params.count_only) {
+        const data = await apiGet<StreamItemIdsResponse>(
+          "/reader/api/0/stream/items/ids",
+          { s: streamId, n: "10000", output: "json" }
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ total: data.itemRefs.length }, null, 2),
+            },
+          ],
+        };
+      }
+
       const queryParams: Record<string, string> = {
         output: "json",
         n: String(params.count ?? 100),
@@ -298,7 +319,7 @@ export function registerReadingTools(server: McpServer): void {
       if (params.continuation) queryParams.c = params.continuation;
 
       const data = await apiGet<StreamContentsResponse>(
-        `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/saved-web-pages")}`,
+        `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
         queryParams
       );
 

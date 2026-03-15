@@ -9,7 +9,7 @@ const SYSTEM_TAGS: Record<string, string> = {
   like: "user/-/state/com.google/like",
   broadcast: "user/-/state/com.google/broadcast",
   "saved-web-pages": "user/-/state/com.google/saved-web-page",
-  keep: "user/-/label/keep",
+  keep: "user/-/label/Keep",
 };
 
 function resolveTag(tag: string): string {
@@ -19,7 +19,7 @@ function resolveTag(tag: string): string {
 export function registerOrganizationTools(server: McpServer): void {
   server.tool(
     "manage_tags",
-    "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. To save/unsave a web page: add/remove_tag='saved-web-pages'. To protect a saved web page from cleanup: add_tag='keep'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', 'saved-web-pages', 'keep', or any custom label name. Costs 1 Zone 2 request.",
+    "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. To save/unsave a web page: add/remove_tag='saved-web-pages'. To protect a saved web page from cleanup: add_tag='Keep'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', 'saved-web-pages', 'Keep', or any custom label name. Costs 1 Zone 2 request.",
     {
       article_ids: z
         .array(z.string())
@@ -109,7 +109,7 @@ export function registerOrganizationTools(server: McpServer): void {
 
   server.tool(
     "remove_saved_web_pages",
-    "Remove saved web pages by article ID. Use get_saved_web_pages with filter 'removable' to find candidates (pages that are neither starred nor tagged 'keep'). To protect a page from cleanup without starring it, use manage_tags with add_tag='keep'. Costs 1 Zone 2 request.",
+    "Remove saved web pages by article ID. Use get_saved_web_pages with filter 'removable' to find candidates (pages that are neither starred nor tagged 'Keep'). To protect a page from cleanup without starring it, use manage_tags with add_tag='Keep'. Costs 1 Zone 2 request.",
     {
       article_ids: z
         .array(z.string())

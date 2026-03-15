@@ -18,7 +18,7 @@ function formatArticle(item: ArticleItem) {
   const isStarred = item.categories.some((c) =>
     c.includes("state/com.google/starred")
   );
-  const isKept = item.categories.some((c) => c.endsWith("/label/keep"));
+  const isKept = item.categories.some((c) => c.endsWith("/label/Keep"));
   const summary = item.summary?.content
     ? item.summary.content.replace(/<[^>]*>/g, "").slice(0, 300)
     : "";
@@ -272,12 +272,12 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_saved_web_pages",
-    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'keep' (via manage_tags add_tag='keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Set count_only=true to get just the total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
+    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Set count_only=true to get just the total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
     {
       filter: z
         .enum(["all", "starred", "unstarred", "removable"])
         .optional()
-        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'keep' -- the best filter for cleanup. 'unstarred' excludes starred only."),
+        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'Keep' -- the best filter for cleanup. 'unstarred' excludes starred only."),
       count: z
         .number()
         .min(1)

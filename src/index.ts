@@ -7,6 +7,8 @@ import { registerReadingTools } from "./tools/reading.js";
 import { registerSubscriptionTools } from "./tools/subscriptions.js";
 import { registerOrganizationTools } from "./tools/organization.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
+import { registerResources } from "./resources.js";
+import { registerPrompts } from "./prompts.js";
 
 const server = new McpServer({
   name: "inoreader-mcp",
@@ -64,6 +66,8 @@ registerReadingTools(server);
 registerSubscriptionTools(server);
 registerOrganizationTools(server);
 registerAnalyticsTools(server);
+registerResources(server);
+registerPrompts(server);
 
 // Start server
 const transport = new StdioServerTransport();

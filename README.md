@@ -41,6 +41,17 @@ Or for Claude Desktop, add to your config file:
 
 On first use, ask Claude to call the `setup_auth` tool. It will give you an OAuth URL to open in your browser. After authorizing, copy the `code` parameter from the redirect URL and pass it back. Tokens are saved to `~/.config/inoreader-mcp/tokens.json` and refresh automatically.
 
+## Resources
+
+Context that MCP clients can read directly without tool calls. All are cached after first fetch.
+
+| Resource | URI | Description | API Cost |
+|----------|-----|-------------|----------|
+| `rate-limits` | `inoreader://rate-limits` | Current API rate limit usage and remaining budget | 0 |
+| `subscriptions` | `inoreader://subscriptions` | All feeds with id, title, URL, and folder assignments | 1 Z1 |
+| `folders` | `inoreader://folders` | Folder and tag structure | 1 Z1 |
+| `unread-counts` | `inoreader://unread-counts` | Unread counts per feed and folder (non-zero, sorted descending) | 1 Z1 |
+
 ## Tools
 
 ### API primitives
@@ -103,6 +114,18 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 The saved pages workflow supports a `keep` tag (via `manage_tags add_tag='keep'`) to protect pages from cleanup without starring them. Use `get_saved_web_pages` with `filter='removable'` to find pages that are neither starred nor kept.
 
 **Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Inoreader enforces ~100 requests/day per zone.
+
+## Prompts
+
+Pre-built workflows that combine resources and tools into guided tasks.
+
+| Prompt | Description | Arguments |
+|--------|-------------|-----------|
+| `triage-unread` | Review unread articles, summarize each, suggest read/star/skip | `folder?`, `count?` |
+| `feed-health-review` | Analyze feed engagement, identify unsubscribe candidates | `months?`, `folder?` |
+| `organize-uncategorized` | Find feeds with no folder and suggest assignments | -- |
+| `summarize-recent` | Digest recent articles grouped by source with key themes | `folder?`, `hours?` |
+| `review-saved-web-pages` | Review saved pages, decide which to keep or remove | -- |
 
 ## Rate Limits
 

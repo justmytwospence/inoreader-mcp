@@ -51,12 +51,27 @@ export function registerSubscriptionTools(server: McpServer): void {
 
   server.tool(
     "list_subscriptions",
-    "List all RSS feed subscriptions with their folders, URLs, and metadata. Costs 1 Zone 1 request.",
+    "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.",
     {
       folder: z
         .string()
         .optional()
         .describe("Filter to subscriptions in this folder name"),
+      search: z
+        .string()
+        .optional()
+        .describe("Filter by title or URL (case-insensitive substring match)"),
+      limit: z
+        .number()
+        .min(1)
+        .max(500)
+        .optional()
+        .describe("Max subscriptions to return (default 100)"),
+      offset: z
+        .number()
+        .min(0)
+        .optional()
+        .describe("Number of subscriptions to skip (default 0)"),
     },
     async (params) => {
       const data = await apiGet<SubscriptionListResponse>(
@@ -70,7 +85,6 @@ export function registerSubscriptionTools(server: McpServer): void {
         feed_url: s.url,
         site_url: s.htmlUrl,
         folders: s.categories.map((c) => c.label),
-        icon_url: s.iconUrl ?? null,
       }));
 
       if (params.folder) {
@@ -81,15 +95,33 @@ export function registerSubscriptionTools(server: McpServer): void {
         );
       }
 
+      if (params.search) {
+        const q = params.search.toLowerCase();
+        subs = subs.filter(
+          (s) =>
+            s.title.toLowerCase().includes(q) ||
+            s.feed_url.toLowerCase().includes(q) ||
+            s.site_url.toLowerCase().includes(q)
+        );
+      }
+
+      const total = subs.length;
+      const offset = params.offset ?? 0;
+      const limit = params.limit ?? 100;
+      const page = subs.slice(offset, offset + limit);
+
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(
-              { subscriptions: subs, total: subs.length },
-              null,
-              2
-            ),
+            text: JSON.stringify({
+              subscriptions: page,
+              total,
+              showing: `${offset + 1}-${offset + page.length} of ${total}`,
+              ...(offset + page.length < total
+                ? { next_offset: offset + limit }
+                : {}),
+            }),
           },
         ],
       };
@@ -284,6 +316,29 @@ export function registerSubscriptionTools(server: McpServer): void {
               null,
               2
             ),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "rename_folder",
+    "Rename a folder/label. All feeds in the old folder are moved to the new name. Costs 1 Zone 2 request.",
+    {
+      old_name: z.string().describe("Current folder name"),
+      new_name: z.string().describe("New folder name"),
+    },
+    async (params) => {
+      await apiPost<string>("/reader/api/0/rename-tag", {
+        s: `user/-/label/${params.old_name}`,
+        dest: `user/-/label/${params.new_name}`,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Renamed folder "${params.old_name}" to "${params.new_name}"`,
           },
         ],
       };

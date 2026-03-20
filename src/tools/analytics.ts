@@ -14,7 +14,7 @@ import type {
 export function registerAnalyticsTools(server: McpServer): void {
   server.tool(
     "analyze_feeds",
-    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + engagement_pages + engaged_feed_count Zone 1 requests on first call, 0 on subsequent cached calls.",
+    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / months) to surface pruning candidates. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + engagement_pages + volume_feeds Zone 1 requests on first call (volume_feeds = engaged feeds + volume_sample), 0 on subsequent cached calls.",
     {
       folder: z
         .string()
@@ -27,9 +27,9 @@ export function registerAnalyticsTools(server: McpServer): void {
         .optional()
         .describe("Time window in months to analyze (default 3)"),
       sort_by: z
-        .enum(["engagement_rate", "credible_lower", "engaged_count", "title", "days_since_newest"])
+        .enum(["engagement_rate", "credible_lower", "engaged_count", "title", "days_since_newest", "unengaged_per_month"])
         .optional()
-        .describe("Sort results by (default: engagement_rate). Use credible_lower for conservative ranking that penalizes small samples more."),
+        .describe("Sort results by (default: unengaged_per_month). unengaged_per_month ranks by estimated wasted articles per month to surface pruning candidates. Use credible_lower for conservative ranking that penalizes small samples more."),
       prior_strength: z
         .number()
         .min(1)
@@ -42,6 +42,12 @@ export function registerAnalyticsTools(server: McpServer): void {
         .max(20)
         .optional()
         .describe("Max total pages of engaged articles to fetch across all engagement tags (100 per page, default 10). More pages = better data but higher API cost."),
+      volume_sample: z
+        .number()
+        .min(0)
+        .max(200)
+        .optional()
+        .describe("How many never-engaged active feeds to also count volume for, to rank noise (default 0). Set higher to find the noisiest unengaged feeds, at 1 extra API call each."),
       limit: z
         .number()
         .min(1)
@@ -73,6 +79,14 @@ export function registerAnalyticsTools(server: McpServer): void {
           output: "json",
         }),
       ]);
+
+      // Build subscription-date lookup (firstitemmsec = first item available, proxy for subscribe date)
+      const feedFirstItemSec = new Map<string, number>();
+      for (const sub of subData.subscriptions) {
+        if (sub.firstitemmsec) {
+          feedFirstItemSec.set(sub.id, Math.floor(parseInt(sub.firstitemmsec) / 1_000_000));
+        }
+      }
 
       // Determine which tags represent engagement (not folders or passive states)
       const folderIds = new Set<string>();
@@ -144,38 +158,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         }
       }
 
-      // For feeds with engagement, fetch total article count in the same window
-      const totalArticlesByFeed = new Map<string, number>();
-      const engagedFeedIds = [...engagedCountByFeed.keys()];
-
-      const sinceTimestampUsec = BigInt(sinceTimestamp) * 1_000_000n;
-
-      await Promise.all(
-        engagedFeedIds.map(async (feedId) => {
-          try {
-            const data = await apiGet<StreamItemIdsResponse>(
-              "/reader/api/0/stream/items/ids",
-              {
-                s: feedId,
-                ot: sinceTimestamp,
-                n: "10000",
-                output: "json",
-              }
-            );
-            z1Cost++;
-            // Filter by published timestamp to exclude backfilled articles
-            // from before the window (newly subscribed feeds import old items
-            // with recent crawl times, so the API's ot filter doesn't catch them)
-            const inWindow = data.itemRefs.filter(
-              (ref) => BigInt(ref.timestampUsec) >= sinceTimestampUsec
-            );
-            totalArticlesByFeed.set(feedId, inWindow.length);
-          } catch {
-            // Some feed IDs from starred articles may no longer be valid
-          }
-        })
-      );
-
+      // Build unread map for dormancy checks
       const unreadMap = new Map(
         unreadData.unreadcounts.map((c) => [
           c.id,
@@ -185,6 +168,75 @@ export function registerAnalyticsTools(server: McpServer): void {
           },
         ])
       );
+
+      // Helper to fetch article count for a single feed in the window
+      const totalArticlesByFeed = new Map<string, number>();
+      const feedEffectiveMonths = new Map<string, number>();
+
+      async function countFeedArticles(feedId: string): Promise<void> {
+        try {
+          const feedStartSec = feedFirstItemSec.get(feedId);
+          const effectiveStartSec = feedStartSec
+            ? Math.max(parseInt(sinceTimestamp), feedStartSec)
+            : parseInt(sinceTimestamp);
+
+          const effectiveMonths = Math.max(
+            (Date.now() / 1000 - effectiveStartSec) / (30 * 24 * 60 * 60),
+            0.1
+          );
+          feedEffectiveMonths.set(feedId, effectiveMonths);
+
+          const data = await apiGet<StreamItemIdsResponse>(
+            "/reader/api/0/stream/items/ids",
+            {
+              s: feedId,
+              ot: String(effectiveStartSec),
+              n: "10000",
+              output: "json",
+            }
+          );
+          z1Cost++;
+          totalArticlesByFeed.set(feedId, (data.itemRefs ?? []).length);
+        } catch {
+          // Feed may no longer be valid
+        }
+      }
+
+      // 1. Always fetch volume for engaged feeds (needed for engagement_rate)
+      const engagedFeedIds = [...engagedCountByFeed.keys()];
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < engagedFeedIds.length; i += BATCH_SIZE) {
+        const batch = engagedFeedIds.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(countFeedArticles));
+      }
+
+      // 2. Optionally fetch volume for a sample of never-engaged active feeds
+      const volumeSample = params.volume_sample ?? 0;
+      if (volumeSample > 0) {
+        const now = Date.now();
+        const engagedFeedIdSet = new Set(engagedFeedIds);
+        const neverEngagedActive = subData.subscriptions
+          .filter((sub) => {
+            if (engagedFeedIdSet.has(sub.id)) return false;
+            const unread = unreadMap.get(sub.id);
+            if (!unread?.newestItemTimestamp) return false;
+            const daysSince = (now - unread.newestItemTimestamp) / (1000 * 60 * 60 * 24);
+            return daysSince <= 90;
+          })
+          .sort((a, b) => {
+            // Sort by most recently active first
+            const aTime = unreadMap.get(a.id)?.newestItemTimestamp ?? 0;
+            const bTime = unreadMap.get(b.id)?.newestItemTimestamp ?? 0;
+            return bTime - aTime;
+          })
+          .slice(0, volumeSample)
+          .map((sub) => sub.id);
+
+        for (let i = 0; i < neverEngagedActive.length; i += BATCH_SIZE) {
+          const batch = neverEngagedActive.slice(i, i + BATCH_SIZE);
+          await Promise.all(batch.map(countFeedArticles));
+        }
+      }
 
       // Build category -> feed IDs mapping (feeds appear in ALL their categories)
       const categoryFeedIds = new Map<string, string[]>();
@@ -295,7 +347,12 @@ export function registerAnalyticsTools(server: McpServer): void {
           // Engaged articles exist but total count fetch failed
           engagementRate = null;
           credibleLower = null;
+        } else if (totalArticles !== null) {
+          // Volume known but zero engagement
+          engagementRate = 0;
+          credibleLower = 0;
         } else {
+          // No volume data (never-engaged, not sampled)
           engagementRate = 0;
           credibleLower = 0;
         }
@@ -321,6 +378,9 @@ export function registerAnalyticsTools(server: McpServer): void {
           credible_lower: credibleLower !== null ? Math.round(credibleLower * 10000) / 10000 : null,
           newest_item_date: newestItemDate,
           days_since_newest: daysSinceNewest ? Math.round(daysSinceNewest) : null,
+          unengaged_per_month: engagementRate !== null && totalArticles !== null
+            ? Math.round((1 - engagementRate) * totalArticles / (feedEffectiveMonths.get(sub.id) ?? monthsBack) * 100) / 100
+            : null,
           status,
         };
       });
@@ -333,7 +393,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         );
       }
 
-      const sortBy = params.sort_by ?? "engagement_rate";
+      const sortBy = params.sort_by ?? "unengaged_per_month";
       if (sortBy === "engagement_rate") {
         feeds.sort((a, b) => (b.engagement_rate ?? -1) - (a.engagement_rate ?? -1));
       } else if (sortBy === "credible_lower") {
@@ -342,6 +402,8 @@ export function registerAnalyticsTools(server: McpServer): void {
         feeds.sort((a, b) => b.engaged_count - a.engaged_count);
       } else if (sortBy === "days_since_newest") {
         feeds.sort((a, b) => (b.days_since_newest ?? 9999) - (a.days_since_newest ?? 9999));
+      } else if (sortBy === "unengaged_per_month") {
+        feeds.sort((a, b) => (b.unengaged_per_month ?? -1) - (a.unengaged_per_month ?? -1));
       } else {
         feeds.sort((a, b) => a.title.localeCompare(b.title));
       }
@@ -358,6 +420,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         engagement_tags_used: engagementTagIds.length,
         engagement_tag_ids: engagementTagIds,
         api_cost_z1: z1Cost,
+        volume_feeds_counted: totalArticlesByFeed.size,
         prior: {
           strength: priorStrength,
           global_fallback: {

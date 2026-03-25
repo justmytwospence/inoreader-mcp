@@ -38,6 +38,25 @@ function formatArticle(item: ArticleItem) {
   };
 }
 
+function formatArticleCompact(item: ArticleItem) {
+  const isStarred = item.categories.some((c) =>
+    c.includes("state/com.google/starred")
+  );
+  const isKept = item.categories.some((c) => c.endsWith("/label/Keep"));
+  const isSavedWebPage = item.categories.some((c) =>
+    c.includes("state/com.google/saved-web-page")
+  );
+
+  return {
+    id: item.id,
+    title: item.title,
+    source: item.origin?.title ?? "",
+    is_starred: isStarred,
+    is_kept: isKept,
+    is_saved_web_page: isSavedWebPage,
+  };
+}
+
 export function registerReadingTools(server: McpServer): void {
   server.tool(
     "get_unread_counts",
@@ -103,6 +122,10 @@ export function registerReadingTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Continuation token for pagination (from previous response)"),
+      compact: z
+        .boolean()
+        .optional()
+        .describe("Return only id, title, source, is_starred, is_kept (default false). Use for triage workflows to avoid large responses."),
     },
     async (params) => {
       const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
@@ -128,8 +151,9 @@ export function registerReadingTools(server: McpServer): void {
         queryParams
       );
 
+      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
       const result = {
-        articles: data.items.map(formatArticle),
+        articles: data.items.map(formatter),
         continuation: data.continuation ?? null,
         total_returned: data.items.length,
       };
@@ -147,7 +171,7 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_article_ids",
-    "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. Costs 1 Zone 1 request.",
+    "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. For a middle ground with titles, use get_articles with compact=true instead. Costs 1 Zone 1 request.",
     {
       stream_id: z
         .string()
@@ -233,6 +257,10 @@ export function registerReadingTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Continuation token for pagination (from previous response)"),
+      compact: z
+        .boolean()
+        .optional()
+        .describe("Return only id, title, source, is_starred, is_kept (default false)."),
     },
     async (params) => {
       const queryParams: Record<string, string> = {
@@ -253,8 +281,9 @@ export function registerReadingTools(server: McpServer): void {
         queryParams
       );
 
+      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
       const result = {
-        articles: data.items.map(formatArticle),
+        articles: data.items.map(formatter),
         continuation: data.continuation ?? null,
         total_returned: data.items.length,
       };
@@ -292,6 +321,10 @@ export function registerReadingTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Continuation token for pagination"),
+      compact: z
+        .boolean()
+        .optional()
+        .describe("Return only id, title, source, is_starred, is_kept (default false)."),
     },
     async (params) => {
       const streamId = "user/-/state/com.google/saved-web-pages";
@@ -323,7 +356,8 @@ export function registerReadingTools(server: McpServer): void {
         queryParams
       );
 
-      let pages = data.items.map(formatArticle);
+      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+      let pages = data.items.map(formatter);
       if (params.filter === "starred") {
         pages = pages.filter((p) => p.is_starred);
       } else if (params.filter === "unstarred") {

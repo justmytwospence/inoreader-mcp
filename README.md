@@ -63,10 +63,10 @@ Thin wrappers around individual Inoreader API endpoints.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_unread_counts` | Unread counts for all feeds/folders, sorted by count | 1 Z1 |
-| `get_articles` | Fetch articles with filters (stream, status, date range, pagination) | 1 Z1/page |
-| `get_article_ids` | Lightweight ID-only fetch for counting/batch ops | 1 Z1 |
+| `get_articles` | Fetch articles with filters (stream, status, date range, pagination). `compact=true` returns id/title/source/flags only (~10x smaller). `include_total=false` skips the count request. | 1-2 Z1/page |
+| `get_article_ids` | Lightweight ID-only fetch for counting/batch ops. Use `get_articles(compact=true)` for a middle ground with titles. | 1 Z1 |
 | `get_article_content` | Full HTML content for specific articles by ID | 1 Z1 |
-| `search_articles` | Keyword search across all feeds | 1 Z1/page |
+| `search_articles` | Keyword search across all feeds. Supports `compact=true`. | 1 Z1/page |
 
 #### Subscriptions
 
@@ -80,8 +80,9 @@ Thin wrappers around individual Inoreader API endpoints.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `manage_tags` | Mark read/unread/starred, apply/remove tags (batch support) | 1 Z2 |
+| `batch_manage_tags` | Apply different tags to different article groups in one call — ideal for triage workflows | 1 Z2/op |
 | `mark_all_read` | Mark all items in a feed/folder as read | 1 Z2 |
-| `list_folders_and_tags` | All folders and tags with unread counts | 1 Z1 |
+| `list_folders_and_tags` | All folders and tags with unread counts (unread only; use `get_article_ids` for totals) | 1 Z1 |
 
 #### Account
 
@@ -99,19 +100,22 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
-| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map | 1 Z2/feed |
+| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map. Preferred over `batch_edit_subscriptions`. | 1 Z2/feed |
 | `reassign_feeds` | Move feeds between folders in bulk | 1 Z2/feed |
-| `batch_edit_subscriptions` | Add multiple feeds to folders in one call | 1 Z2/feed |
+| `batch_edit_subscriptions` | **Deprecated** — use `categorize_feeds` instead | 1 Z2/feed |
 | `analyze_feeds` | Bayesian feed health analysis with category-level priors | 3+ Z1 |
 
-#### Saved web pages
+#### Saved items
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged) | 1 Z1/page |
+| `get_saved_items` | Union of starred articles + saved web pages + Keep-tagged items in one call. Deduplicates and adds `saved_via` field. Use instead of 3+ separate calls. | 3 Z1 |
+| `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged). Supports `compact=true`. | 1 Z1/page |
 | `remove_saved_web_pages` | Batch-remove saved pages by ID | 1 Z2 |
 
-The saved pages workflow supports a `keep` tag (via `manage_tags add_tag='keep'`) to protect pages from cleanup without starring them. Use `get_saved_web_pages` with `filter='removable'` to find pages that are neither starred nor kept.
+Starred articles, saved web pages, and Keep-tagged items are disjoint collections in the Inoreader API. `get_saved_items` fetches all three and deduplicates them. Each item includes a `saved_via` array (`["starred"]`, `["saved_web_page", "keep"]`, etc.) showing which collections it belongs to.
+
+The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup without starring it. Use `get_saved_web_pages(filter='removable')` for pages that are neither starred nor kept.
 
 **Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Inoreader enforces ~100 requests/day per zone.
 

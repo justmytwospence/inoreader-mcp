@@ -100,9 +100,8 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
-| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map. Preferred over `batch_edit_subscriptions`. | 1 Z2/feed |
+| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map | 1 Z2/feed |
 | `reassign_feeds` | Move feeds between folders in bulk | 1 Z2/feed |
-| `batch_edit_subscriptions` | **Deprecated** — use `categorize_feeds` instead | 1 Z2/feed |
 | `analyze_feeds` | Bayesian feed health analysis with category-level priors | 3+ Z1 |
 
 #### Saved items

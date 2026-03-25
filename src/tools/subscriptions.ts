@@ -10,32 +10,66 @@ const BatchEditSchema = z.array(
   })
 );
 
+async function assignFeedToFolder(
+  streamId: string,
+  folder: string
+): Promise<{ streamId: string; folder: string; ok: boolean; error?: string }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await apiPost<string>("/reader/api/0/subscription/edit", {
+        ac: "edit",
+        s: streamId,
+        a: `user/-/label/${folder}`,
+      });
+      return { streamId, folder, ok: true };
+    } catch (e) {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } else {
+        return {
+          streamId,
+          folder,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+  }
+  return { streamId, folder, ok: false, error: "unreachable" };
+}
+
 export function registerSubscriptionTools(server: McpServer): void {
   server.tool(
     "batch_edit_subscriptions",
-    "Add multiple feeds to folders in one call. Each edit costs 1 Zone 2 request. Pass an array of {stream_id, add_to_folder} objects.",
+    "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Each edit costs 1 Zone 2 request.",
     {
       edits: BatchEditSchema.describe("Array of edits to apply"),
     },
     async (params) => {
-      const results: { stream_id: string; folder: string; ok: boolean; error?: string }[] = [];
+      const assignments: Record<string, string[]> = {};
       for (const edit of params.edits) {
-        try {
-          await apiPost<string>("/reader/api/0/subscription/edit", {
-            ac: "edit",
-            s: edit.stream_id,
-            a: `user/-/label/${edit.add_to_folder}`,
-          });
-          results.push({ stream_id: edit.stream_id, folder: edit.add_to_folder, ok: true });
-        } catch (e) {
-          results.push({
-            stream_id: edit.stream_id,
-            folder: edit.add_to_folder,
-            ok: false,
-            error: e instanceof Error ? e.message : String(e),
-          });
+        if (!assignments[edit.add_to_folder]) assignments[edit.add_to_folder] = [];
+        assignments[edit.add_to_folder].push(edit.stream_id);
+      }
+
+      const pairs: { streamId: string; folder: string }[] = [];
+      for (const [folder, streamIds] of Object.entries(assignments)) {
+        for (const streamId of streamIds) {
+          pairs.push({ streamId, folder });
         }
       }
+
+      const results: { streamId: string; folder: string; ok: boolean; error?: string }[] = [];
+      const concurrency = 3;
+      for (let i = 0; i < pairs.length; i += concurrency) {
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 100));
+        const batch = pairs.slice(i, i + concurrency);
+        const batchResults = await Promise.all(
+          batch.map(({ streamId, folder }) => assignFeedToFolder(streamId, folder))
+        );
+        results.push(...batchResults);
+      }
+
       const succeeded = results.filter((r) => r.ok).length;
       const failed = results.filter((r) => !r.ok).length;
       return {
@@ -192,28 +226,13 @@ export function registerSubscriptionTools(server: McpServer): void {
       }
 
       const results: { streamId: string; folder: string; ok: boolean; error?: string }[] = [];
-      const concurrency = 10;
+      const concurrency = 3;
 
       for (let i = 0; i < pairs.length; i += concurrency) {
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 100));
         const batch = pairs.slice(i, i + concurrency);
         const batchResults = await Promise.all(
-          batch.map(async ({ streamId, folder }) => {
-            try {
-              await apiPost<string>("/reader/api/0/subscription/edit", {
-                ac: "edit",
-                s: streamId,
-                a: `user/-/label/${folder}`,
-              });
-              return { streamId, folder, ok: true as const };
-            } catch (e) {
-              return {
-                streamId,
-                folder,
-                ok: false as const,
-                error: e instanceof Error ? e.message : String(e),
-              };
-            }
-          })
+          batch.map(({ streamId, folder }) => assignFeedToFolder(streamId, folder))
         );
         results.push(...batchResults);
       }

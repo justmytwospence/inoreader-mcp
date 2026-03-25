@@ -92,7 +92,7 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_articles",
-    "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page (max 100 articles per page).",
+    "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page plus 1 for total_count (disable with include_total=false).",
     {
       stream_id: z
         .string()
@@ -126,6 +126,10 @@ export function registerReadingTools(server: McpServer): void {
         .boolean()
         .optional()
         .describe("Return only id, title, source, is_starred, is_kept (default false). Use for triage workflows to avoid large responses."),
+      include_total: z
+        .boolean()
+        .optional()
+        .describe("Include total_count of all matching items across pages (default true). Set false to save 1 Zone 1 request."),
     },
     async (params) => {
       const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
@@ -146,17 +150,33 @@ export function registerReadingTools(server: McpServer): void {
         queryParams.it = "user/-/state/com.google/starred";
       }
 
-      const data = await apiGet<StreamContentsResponse>(
-        `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
-        queryParams
-      );
+      const includeTotal = params.include_total !== false;
+      const totalCountParams: Record<string, string> = {
+        output: "json",
+        n: "10000",
+        s: streamId,
+      };
+      if (queryParams.xt) totalCountParams.xt = queryParams.xt;
+      if (queryParams.it) totalCountParams.it = queryParams.it;
+      if (queryParams.ot) totalCountParams.ot = queryParams.ot;
+
+      const [data, idsData] = await Promise.all([
+        apiGet<StreamContentsResponse>(
+          `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
+          queryParams
+        ),
+        includeTotal
+          ? apiGet<StreamItemIdsResponse>("/reader/api/0/stream/items/ids", totalCountParams)
+          : Promise.resolve(null),
+      ]);
 
       const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
-      const result = {
+      const result: Record<string, unknown> = {
         articles: data.items.map(formatter),
         continuation: data.continuation ?? null,
         total_returned: data.items.length,
       };
+      if (idsData !== null) result.total_count = idsData.itemRefs.length;
 
       return {
         content: [
@@ -377,6 +397,76 @@ export function registerReadingTools(server: McpServer): void {
           {
             type: "text" as const,
             text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "get_saved_items",
+    "Get all saved items in one call: union of starred articles, saved web pages, and Keep-tagged items. Deduplicates across collections and adds a saved_via field showing which collections each item belongs to. Use instead of making 3+ separate calls to piece together what the user sees as 'Saved'. Costs 3 Zone 1 requests.",
+    {
+      compact: z
+        .boolean()
+        .optional()
+        .describe("Return only id, title, source, is_starred, is_kept, saved_via (default true)."),
+    },
+    async (params) => {
+      const compact = params.compact !== false;
+
+      const [starredData, savedWebPagesData, keepData] = await Promise.all([
+        apiGet<StreamContentsResponse>(
+          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/reading-list")}`,
+          { output: "json", n: "1000", it: "user/-/state/com.google/starred" }
+        ),
+        apiGet<StreamContentsResponse>(
+          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/saved-web-pages")}`,
+          { output: "json", n: "1000" }
+        ),
+        apiGet<StreamContentsResponse>(
+          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/label/Keep")}`,
+          { output: "json", n: "1000" }
+        ),
+      ]);
+
+      const starredIds = new Set(starredData.items.map((i) => i.id));
+      const savedWebPageIds = new Set(savedWebPagesData.items.map((i) => i.id));
+      const keepIds = new Set(keepData.items.map((i) => i.id));
+
+      const allItems = new Map<string, ArticleItem>();
+      for (const item of [...starredData.items, ...savedWebPagesData.items, ...keepData.items]) {
+        if (!allItems.has(item.id)) allItems.set(item.id, item);
+      }
+
+      const formatter = compact ? formatArticleCompact : formatArticle;
+      const items = Array.from(allItems.values())
+        .sort((a, b) => b.published - a.published)
+        .map((item) => {
+          const saved_via: string[] = [];
+          if (starredIds.has(item.id)) saved_via.push("starred");
+          if (savedWebPageIds.has(item.id)) saved_via.push("saved_web_page");
+          if (keepIds.has(item.id)) saved_via.push("keep");
+          return { ...formatter(item), saved_via };
+        });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                items,
+                total_count: items.length,
+                by_collection: {
+                  starred: starredIds.size,
+                  saved_web_pages: savedWebPageIds.size,
+                  keep: keepIds.size,
+                },
+              },
+              null,
+              2
+            ),
           },
         ],
       };

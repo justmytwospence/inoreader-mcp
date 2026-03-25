@@ -139,7 +139,7 @@ export function registerOrganizationTools(server: McpServer): void {
 
   server.tool(
     "list_folders_and_tags",
-    "List all folders, tags, and labels. Costs 1 Zone 1 request.",
+    "List all folders, tags, and labels with their unread counts. Note: only unread_count is available here; total_count (including read items) requires a separate get_article_ids call per tag. Costs 1 Zone 1 request.",
     {},
     async () => {
       const [tags, unreadData] = await Promise.all([
@@ -164,6 +164,81 @@ export function registerOrganizationTools(server: McpServer): void {
           {
             type: "text" as const,
             text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "batch_manage_tags",
+    "Apply different tags to different groups of articles in one call. Useful for triage workflows where you categorize items into multiple groups at once. Each operation is one API call. Costs 1 Zone 2 request per operation.",
+    {
+      operations: z
+        .array(
+          z.object({
+            article_ids: z
+              .array(z.string())
+              .min(1)
+              .describe("Article IDs to modify"),
+            add_tag: z
+              .string()
+              .optional()
+              .describe("Tag to add: 'read', 'starred', 'like', 'broadcast', or a custom label name"),
+            remove_tag: z
+              .string()
+              .optional()
+              .describe("Tag to remove (same options as add_tag)"),
+          })
+        )
+        .min(1)
+        .describe("Array of tag operations to perform"),
+    },
+    async (params) => {
+      const results: { index: number; article_count: number; ok: boolean; error?: string }[] = [];
+
+      for (let i = 0; i < params.operations.length; i++) {
+        const op = params.operations[i];
+        if (!op.add_tag && !op.remove_tag) {
+          results.push({ index: i, article_count: op.article_ids.length, ok: false, error: "at least one of add_tag or remove_tag is required" });
+          continue;
+        }
+        try {
+          const searchParams = new URLSearchParams();
+          for (const id of op.article_ids) {
+            searchParams.append("i", id);
+          }
+          if (op.add_tag) searchParams.append("a", resolveTag(op.add_tag));
+          if (op.remove_tag) searchParams.append("r", resolveTag(op.remove_tag));
+          await apiPost<string>("/reader/api/0/edit-tag", searchParams);
+          results.push({ index: i, article_count: op.article_ids.length, ok: true });
+        } catch (e) {
+          results.push({
+            index: i,
+            article_count: op.article_ids.length,
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok).length;
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                total_operations: params.operations.length,
+                succeeded,
+                failed,
+                errors: failed > 0 ? results.filter((r) => !r.ok) : undefined,
+              },
+              null,
+              2
+            ),
           },
         ],
       };

@@ -14,7 +14,7 @@ import type {
 export function registerAnalyticsTools(server: McpServer): void {
   server.tool(
     "analyze_feeds",
-    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. The analysis window is clamped per feed to the subscription start date (firstitemmsec), so newly added feeds are not penalized for articles published before they were subscribed; total_articles and unengaged_per_month reflect each feed's actual exposure window. Engagement pagination terminates naturally when the time filter is exhausted, so coverage is exhaustive within the window and not bounded by guesswork; the engagement_pages parameter only acts as a per-tag runaway safety cap. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / feed_months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + (engagement pages until window exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests on first call, 0 on subsequent cached calls.",
+    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Feeds added partway through the window are slightly penalized (volume includes pre-subscription articles as 'skipped'), since Inoreader's API does not expose a reliable per-user subscription start date. Engagement pagination terminates naturally when the time filter is exhausted, so coverage is exhaustive within the window and not bounded by guesswork; the engagement_pages parameter only acts as a per-tag runaway safety cap. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + (engagement pages until window exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests on first call, 0 on subsequent cached calls.",
     {
       folder: z
         .string()
@@ -178,24 +178,6 @@ export function registerAnalyticsTools(server: McpServer): void {
         ])
       );
 
-      // Per-feed analysis window: clamp to subscription start so feeds added
-      // partway through the window aren't penalized for articles published
-      // before the user subscribed.
-      const feedSinceByFeed = new Map<string, number>();
-      const feedMonthsByFeed = new Map<string, number>();
-      const monthSeconds = 30 * 24 * 60 * 60;
-      for (const sub of subData.subscriptions) {
-        const subStartSec = sub.firstitemmsec
-          ? Math.floor(parseInt(sub.firstitemmsec, 10) / 1000)
-          : 0;
-        const effectiveSince = Math.max(globalSinceSec, subStartSec);
-        feedSinceByFeed.set(sub.id, effectiveSince);
-        feedMonthsByFeed.set(
-          sub.id,
-          Math.max(0.1, (Date.now() / 1000 - effectiveSince) / monthSeconds)
-        );
-      }
-
       // Helper to fetch article count for a single feed in the window
       const totalArticlesByFeed = new Map<string, number>();
 
@@ -205,7 +187,7 @@ export function registerAnalyticsTools(server: McpServer): void {
             "/reader/api/0/stream/items/ids",
             {
               s: feedId,
-              ot: String(feedSinceByFeed.get(feedId) ?? globalSinceSec),
+              ot: sinceTimestamp,
               n: "10000",
               output: "json",
             }
@@ -403,7 +385,7 @@ export function registerAnalyticsTools(server: McpServer): void {
           days_since_newest: daysSinceNewest ? Math.round(daysSinceNewest) : null,
           skipped: totalArticles !== null ? totalArticles - engagedCount : null,
           unengaged_per_month: engagementRate !== null && totalArticles !== null
-            ? Math.round((1 - engagementRate) * totalArticles / (feedMonthsByFeed.get(sub.id) ?? monthsBack) * 100) / 100
+            ? Math.round((1 - engagementRate) * totalArticles / monthsBack * 100) / 100
             : null,
           status,
         };

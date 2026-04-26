@@ -107,9 +107,9 @@ export function registerPrompts(server: McpServer): void {
   server.registerPrompt(
     "organize-uncategorized",
     {
-      title: "Organize uncategorized feeds",
+      title: "Organize and rename uncategorized feeds",
       description:
-        "Find feeds with no folder and suggest folder assignments based on existing structure.",
+        "Find feeds with no folder, propose cleaned-up titles, and suggest folder assignments based on existing structure.",
     },
     () => ({
       messages: [
@@ -118,14 +118,17 @@ export function registerPrompts(server: McpServer): void {
           content: {
             type: "text" as const,
             text: [
-              "Help me organize my uncategorized feeds into folders.",
+              "Help me organize my uncategorized feeds: clean up their titles and assign them to folders.",
               "",
               "Steps:",
               "1. Call get_uncategorized_feeds with include_url true to see feeds without folders.",
               "2. Call list_folders_and_tags to see the existing folder structure.",
-              "3. For each uncategorized feed, suggest which existing folder it belongs in based on the feed title and URL. If no existing folder fits, propose a new folder name.",
-              "4. Present all assignments as a table: Feed Title, URL, Suggested Folder, Reason.",
-              "5. Ask for my approval, then execute the assignments via categorize_feeds.",
+              "3. For each feed, propose a cleaned-up title. Strip filler like \"Blog on\", \"Posts on\", \"- blog\", \"blog feed\", \"'s Blog\", \"RSS\", and similar boilerplate. Prefer the author or publication name. Skip the rename if the current title is already clean.",
+              "4. For each feed, suggest which existing folder it belongs in based on the title and URL. If the topic is unclear from those alone, fetch the site URL to read the about/intro before deciding. If no existing folder fits, propose a new one.",
+              "5. Present all assignments as a table: Current Title, Proposed Title, URL, Suggested Folder, Reason.",
+              "6. Ask for my approval, then execute:",
+              "   - For each rename: call manage_subscription with action \"edit\", the stream_id, and the new title.",
+              "   - For folder assignments: call categorize_feeds once with all assignments grouped by folder.",
             ].join("\n"),
           },
         },

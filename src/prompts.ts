@@ -63,7 +63,7 @@ export function registerPrompts(server: McpServer): void {
         months: z
           .string()
           .optional()
-          .describe("Time window in months to analyze (default 3)"),
+          .describe("Time window in months to analyze (default 12)"),
         folder: z
           .string()
           .optional()
@@ -71,7 +71,7 @@ export function registerPrompts(server: McpServer): void {
       },
     },
     (args) => {
-      const months = args.months ?? "3";
+      const months = args.months ?? "12";
       const folderClause = args.folder
         ? `Limit analysis to the folder "${args.folder}".`
         : "Analyze all feeds.";

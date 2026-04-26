@@ -14,7 +14,7 @@ import type {
 export function registerAnalyticsTools(server: McpServer): void {
   server.tool(
     "analyze_feeds",
-    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. The analysis window is clamped per feed to the subscription start date (firstitemmsec), so newly added feeds are not penalized for articles published before they were subscribed; total_articles and unengaged_per_month reflect each feed's actual exposure window. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / feed_months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + engagement_pages [+ volume_feeds] Zone 1 requests on first call, 0 on subsequent cached calls.",
+    "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. The analysis window is clamped per feed to the subscription start date (firstitemmsec), so newly added feeds are not penalized for articles published before they were subscribed; total_articles and unengaged_per_month reflect each feed's actual exposure window. Engagement pagination terminates naturally when the time filter is exhausted, so coverage is exhaustive within the window and not bounded by guesswork; the engagement_pages parameter only acts as a per-tag runaway safety cap. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / feed_months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Results are cached permanently until refresh is set or a write operation occurs. Costs 3 + (engagement pages until window exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests on first call, 0 on subsequent cached calls.",
     {
       folder: z
         .string()
@@ -25,7 +25,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         .min(1)
         .max(24)
         .optional()
-        .describe("Time window in months to analyze (default 3)"),
+        .describe("Time window in months to analyze (default 12)"),
       sort_by: z
         .enum(["engagement_rate", "credible_lower", "engaged_count", "skipped", "title", "days_since_newest", "unengaged_per_month"])
         .optional()
@@ -39,9 +39,9 @@ export function registerAnalyticsTools(server: McpServer): void {
       engagement_pages: z
         .number()
         .min(1)
-        .max(100)
+        .max(500)
         .optional()
-        .describe("Max total pages of engaged articles to fetch across all engagement tags (100 per page, default 10). More pages = better data but higher API cost."),
+        .describe("Per-tag safety cap on engagement pages (100 items per page, default 100). Pagination normally ends naturally when the ot time filter is exhausted; this cap only binds for users with thousands of engaged items per tag in the window."),
       volume_sample: z
         .number()
         .min(0)
@@ -62,7 +62,7 @@ export function registerAnalyticsTools(server: McpServer): void {
     async (params) => {
       if (params.refresh) invalidateCache();
 
-      const monthsBack = params.months ?? 3;
+      const monthsBack = params.months ?? 12;
       const globalSinceSec = Math.floor(
         (Date.now() - monthsBack * 30 * 24 * 60 * 60 * 1000) / 1000
       );
@@ -105,19 +105,23 @@ export function registerAnalyticsTools(server: McpServer): void {
           return true;
         });
 
-      // Fetch engaged articles across all engagement tags with deduplication
+      // Fetch engaged articles across all engagement tags with deduplication.
+      // Each tag paginates until either the ot time filter is exhausted
+      // (no continuation returned) or the per-tag safety cap is hit.
       const engagedCountByFeed = new Map<string, number>();
       const seenArticleIds = new Set<string>();
-      const maxPages = params.engagement_pages ?? 10;
+      const perTagPageCap = params.engagement_pages ?? 100;
       let totalEngaged = 0;
       let pagesUsed = 0;
+      let safetyCapHit = false;
       let z1Cost = 3; // subscriptions + unread counts + tag list
 
       for (const tagId of engagementTagIds) {
-        if (pagesUsed >= maxPages) break;
         let continuation: string | undefined;
+        let tagPages = 0;
+        let reachedWindowEdge = false;
 
-        while (pagesUsed < maxPages) {
+        while (tagPages < perTagPageCap) {
           const queryParams: Record<string, string> = {
             output: "json",
             n: "100",
@@ -135,9 +139,17 @@ export function registerAnalyticsTools(server: McpServer): void {
             break; // Tag stream not fetchable, skip it
           }
           pagesUsed++;
+          tagPages++;
           z1Cost++;
 
           for (const item of data.items) {
+            // Defensive: stop if API ignored the ot filter and returned
+            // articles older than the window.
+            const itemSec = parseInt(item.timestampUsec ?? "0", 10) / 1_000_000;
+            if (itemSec > 0 && itemSec < globalSinceSec) {
+              reachedWindowEdge = true;
+              continue;
+            }
             if (seenArticleIds.has(item.id)) continue;
             seenArticleIds.add(item.id);
             const feedId = item.origin?.streamId;
@@ -147,9 +159,12 @@ export function registerAnalyticsTools(server: McpServer): void {
             }
           }
 
+          if (reachedWindowEdge) break;
           if (!data.continuation) break;
           continuation = data.continuation;
         }
+
+        if (tagPages >= perTagPageCap) safetyCapHit = true;
       }
 
       // Build unread map for dormancy checks
@@ -426,7 +441,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         dormant: feeds.filter((f) => f.status === "dormant").length,
         window_months: monthsBack,
         engaged_articles_scanned: totalEngaged,
-        has_more_engaged: pagesUsed >= maxPages,
+        has_more_engaged: safetyCapHit,
         engagement_tags_used: engagementTagIds.length,
         engagement_tag_ids: engagementTagIds,
         api_cost_z1: z1Cost,

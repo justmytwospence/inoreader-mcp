@@ -171,12 +171,13 @@ export function registerReadingTools(server: McpServer): void {
       ]);
 
       const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+      const items = data.items ?? [];
       const result: Record<string, unknown> = {
-        articles: data.items.map(formatter),
+        articles: items.map(formatter),
         continuation: data.continuation ?? null,
-        total_returned: data.items.length,
+        total_returned: items.length,
       };
-      if (idsData !== null) result.total_count = idsData.itemRefs.length;
+      if (idsData !== null) result.total_count = (idsData.itemRefs ?? []).length;
 
       return {
         content: [
@@ -239,14 +240,15 @@ export function registerReadingTools(server: McpServer): void {
         queryParams
       );
 
+      const itemRefs = data.itemRefs ?? [];
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify(
               {
-                ids: data.itemRefs.map((r) => r.id),
-                count: data.itemRefs.length,
+                ids: itemRefs.map((r) => r.id),
+                count: itemRefs.length,
                 continuation: data.continuation ?? null,
               },
               null,
@@ -302,10 +304,11 @@ export function registerReadingTools(server: McpServer): void {
       );
 
       const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+      const items = data.items ?? [];
       const result = {
-        articles: data.items.map(formatter),
+        articles: items.map(formatter),
         continuation: data.continuation ?? null,
-        total_returned: data.items.length,
+        total_returned: items.length,
       };
 
       return {
@@ -321,12 +324,12 @@ export function registerReadingTools(server: McpServer): void {
 
   server.tool(
     "get_saved_web_pages",
-    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Set count_only=true to get just the total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
+    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Both count_only and listing apply the filter server-side via the Inoreader API. Set count_only=true to get just the filtered total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
     {
       filter: z
         .enum(["all", "starred", "unstarred", "removable"])
         .optional()
-        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'Keep' -- the best filter for cleanup. 'unstarred' excludes starred only."),
+        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'Keep' -- the best filter for cleanup. 'unstarred' excludes starred only. The filter is applied server-side and respected by count_only."),
       count: z
         .number()
         .min(1)
@@ -336,7 +339,7 @@ export function registerReadingTools(server: McpServer): void {
       count_only: z
         .boolean()
         .optional()
-        .describe("Return only the total count, not page details (default false). Uses lightweight IDs endpoint."),
+        .describe("Return only the filtered total, not page details (default false). Uses lightweight IDs endpoint and respects 'filter'."),
       continuation: z
         .string()
         .optional()
@@ -348,25 +351,37 @@ export function registerReadingTools(server: McpServer): void {
     },
     async (params) => {
       const streamId = "user/-/state/com.google/saved-web-pages";
+      const starredStream = "user/-/state/com.google/starred";
+      const keepStream = "user/-/label/Keep";
+
+      const filterParams: Record<string, string | string[]> = {};
+      if (params.filter === "starred") {
+        filterParams.it = starredStream;
+      } else if (params.filter === "unstarred") {
+        filterParams.xt = starredStream;
+      } else if (params.filter === "removable") {
+        filterParams.xt = [starredStream, keepStream];
+      }
 
       if (params.count_only) {
         const data = await apiGet<StreamItemIdsResponse>(
           "/reader/api/0/stream/items/ids",
-          { s: streamId, n: "10000", output: "json" }
+          { s: streamId, n: "10000", output: "json", ...filterParams }
         );
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ total: data.itemRefs.length }, null, 2),
+              text: JSON.stringify({ total: (data.itemRefs ?? []).length }, null, 2),
             },
           ],
         };
       }
 
-      const queryParams: Record<string, string> = {
+      const queryParams: Record<string, string | string[]> = {
         output: "json",
         n: String(params.count ?? 100),
+        ...filterParams,
       };
 
       if (params.continuation) queryParams.c = params.continuation;
@@ -377,14 +392,7 @@ export function registerReadingTools(server: McpServer): void {
       );
 
       const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
-      let pages = data.items.map(formatter);
-      if (params.filter === "starred") {
-        pages = pages.filter((p) => p.is_starred);
-      } else if (params.filter === "unstarred") {
-        pages = pages.filter((p) => !p.is_starred);
-      } else if (params.filter === "removable") {
-        pages = pages.filter((p) => !p.is_kept && !p.is_starred);
-      }
+      const pages = (data.items ?? []).map(formatter);
 
       const result = {
         pages,
@@ -430,12 +438,15 @@ export function registerReadingTools(server: McpServer): void {
         ),
       ]);
 
-      const starredIds = new Set(starredData.items.map((i) => i.id));
-      const savedWebPageIds = new Set(savedWebPagesData.items.map((i) => i.id));
-      const keepIds = new Set(keepData.items.map((i) => i.id));
+      const starredItems = starredData.items ?? [];
+      const savedWebPageItems = savedWebPagesData.items ?? [];
+      const keepItems = keepData.items ?? [];
+      const starredIds = new Set(starredItems.map((i) => i.id));
+      const savedWebPageIds = new Set(savedWebPageItems.map((i) => i.id));
+      const keepIds = new Set(keepItems.map((i) => i.id));
 
       const allItems = new Map<string, ArticleItem>();
-      for (const item of [...starredData.items, ...savedWebPagesData.items, ...keepData.items]) {
+      for (const item of [...starredItems, ...savedWebPageItems, ...keepItems]) {
         if (!allItems.has(item.id)) allItems.set(item.id, item);
       }
 
@@ -494,7 +505,7 @@ export function registerReadingTools(server: McpServer): void {
         searchParams
       );
 
-      const articles = data.items.map((item) => {
+      const articles = (data.items ?? []).map((item) => {
         const url =
           item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? "";
         return {

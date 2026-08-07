@@ -3,6 +3,92 @@ import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
 import type { SubscriptionListResponse } from "../types.js";
 
+// Vendor boilerplate that shows up in feed titles but carries no information.
+// Applied repeatedly until the title stops changing, so stacked filler collapses
+// in one pass ("Jane's Blog RSS Feed" -> "Jane's Blog" -> "Jane").
+const TITLE_CLEANUP_RULES: RegExp[] = [
+  // Leading aggregator prefix: "Blog on Acme", "Posts on Acme", "Comments on Acme"
+  /^(?:Blogs?|Posts|Articles|Comments|Stories|Updates|News)\s+on\s+/i,
+  // Trailing feed-format suffix, with or without a separator:
+  // " - RSS", " | Atom Feed", " RSS Feed", ": News Feed"
+  /\s*[-–—|:]?\s*(?:RSS(?:\s+Feed)?|Atom(?:\s+Feed)?|Blog\s+Feed|News\s+Feed|Feed)\s*$/i,
+  // Trailing separator + Blog: " - blog", " | Blog"
+  /\s*[-–—|:]\s*(?:We)?blog\s*$/i,
+  // Possessive publication suffix: "Jane Doe's Blog" -> "Jane Doe"
+  /['’]s\s+(?:We)?(?:blog|Newsletter|Substack|Website|Site)\s*$/i,
+  // Bare trailing noun: "Acme Blog" -> "Acme"
+  /\s+(?:We)?blog\s*$/i,
+];
+
+// A stripped title that reduces to one of these has lost its identity, not its
+// boilerplate -- the rules bail out and keep the original.
+const RESIDUE_STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "my",
+  "our",
+  "daily",
+  "weekly",
+  "monthly",
+  "official",
+  "home",
+  "main",
+]);
+
+function hostOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+// Drop a trailing " | example.com" / " - Example" segment when it just restates the
+// site the feed already points at. Only fires on a match against the real host, so
+// a title like "Astral Codex Ten - Scott Alexander" is left alone.
+function stripSiteSuffix(title: string, siteUrl?: string): string {
+  const host = hostOf(siteUrl);
+  if (!host) return title;
+  const bare = host.replace(/\.[a-z.]+$/i, "");
+  const match = title.match(/^(.*?)\s*[-–—|:]\s*([^-–—|:]+)$/);
+  if (!match) return title;
+  const candidate = match[2].trim().toLowerCase().replace(/\s+/g, "");
+  if (candidate === host || candidate === bare) return match[1].trim();
+  return title;
+}
+
+/**
+ * Deterministically strip vendor boilerplate from a feed title.
+ *
+ * Pure and side-effect free so the rename half of feed organization needs no LLM
+ * judgment: the same input always yields the same output, which is what makes an
+ * unattended auto-apply safe. Returns the input unchanged when no rule matches, or
+ * when stripping would leave too little to identify the feed.
+ */
+export function normalizeFeedTitle(title: string, siteUrl?: string): string {
+  const original = title;
+  let out = title.replace(/\s+/g, " ").trim();
+
+  for (let pass = 0; pass < 5; pass++) {
+    const before = out;
+    for (const rule of TITLE_CLEANUP_RULES) {
+      out = out.replace(rule, "").trim();
+    }
+    out = stripSiteSuffix(out, siteUrl).trim();
+    if (out === before) break;
+  }
+
+  // Over-stripping is worse than leaving boilerplate in: a title reduced to nothing
+  // (or to a fragment too short to recognize) loses the only handle on the feed.
+  if (out.length < 2) return original.trim();
+  // ...and a title whose only survivor is a determiner or cadence word is no handle
+  // either -- "The Feed" must not become "The", "Daily Blog" must not become "Daily".
+  if (RESIDUE_STOPWORDS.has(out.toLowerCase())) return original.trim();
+  return out;
+}
+
 const BatchEditSchema = z.array(
   z.object({
     stream_id: z.string().describe("Stream ID of the feed"),
@@ -156,6 +242,59 @@ export function registerSubscriptionTools(server: McpServer): void {
                 ? { next_offset: offset + limit }
                 : {}),
             }),
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "suggest_feed_cleanup",
+    "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.",
+    {
+      include_unchanged: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include feeds whose title already needs no change (default false)"
+        ),
+    },
+    async (params) => {
+      const data = await apiGet<SubscriptionListResponse>(
+        "/reader/api/0/subscription/list",
+        { output: "json" }
+      );
+
+      const uncategorized = data.subscriptions.filter(
+        (s) => s.categories.length === 0
+      );
+
+      const feeds = uncategorized
+        .map((s) => {
+          const proposed = normalizeFeedTitle(s.title, s.htmlUrl);
+          return {
+            stream_id: s.id,
+            current_title: s.title,
+            proposed_title: proposed,
+            site_url: s.htmlUrl,
+            changed: proposed !== s.title,
+          };
+        })
+        .filter((f) => (params.include_unchanged ? true : f.changed));
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                uncategorized_count: uncategorized.length,
+                rename_count: feeds.filter((f) => f.changed).length,
+                feeds,
+              },
+              null,
+              2
+            ),
           },
         ],
       };

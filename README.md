@@ -100,6 +100,7 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
+| `suggest_feed_cleanup` | Deterministic cleaned-up title proposals for uncategorized feeds — strips vendor boilerplate (`Blog on X`, `X's Blog`, trailing `RSS`/`Feed`, redundant site suffix). Read-only; apply with `manage_subscription`. | 1 Z1 |
 | `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map | 1 Z2/feed |
 | `reassign_feeds` | Move feeds between folders in bulk | 1 Z2/feed |
 | `analyze_feeds` | Bayesian feed health analysis with category-level priors | 3+ Z1 |

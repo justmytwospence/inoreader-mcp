@@ -6,9 +6,14 @@ const state: RateLimitState = {
 };
 
 export function updateFromHeaders(headers: Headers): void {
-  const zone1Limit = headers.get("x-reader-limits-zone1");
+  // Inoreader sends `x-reader-zone1-limit`, not `x-reader-limits-zone1`.
+  // The latter was the original name here and never matched, so the limit
+  // silently stayed 0. Fall back to the old name in case it ever returns.
+  const zone1Limit =
+    headers.get("x-reader-zone1-limit") ?? headers.get("x-reader-limits-zone1");
   const zone1Usage = headers.get("x-reader-zone1-usage");
-  const zone2Limit = headers.get("x-reader-limits-zone2");
+  const zone2Limit =
+    headers.get("x-reader-zone2-limit") ?? headers.get("x-reader-limits-zone2");
   const zone2Usage = headers.get("x-reader-zone2-usage");
   const resetAfter = headers.get("x-reader-limits-reset-after");
 

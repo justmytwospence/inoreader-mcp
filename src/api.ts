@@ -4,15 +4,32 @@ import { updateFromHeaders } from "./rate-limit.js";
 
 const BASE_URL = "https://www.inoreader.com";
 
-export { invalidate as invalidateCache };
-
-export async function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const url = new URL(path, BASE_URL);
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== "") url.searchParams.set(k, v);
+/**
+ * Apply query params to a URL. Array values are appended as repeated keys,
+ * which is what Inoreader requires for multi-value params such as `xt`.
+ * Using searchParams.set() with an array would coerce it to a single
+ * comma-joined value and the filter would silently not apply.
+ */
+function applyParams(url: URL, params: QueryParams): void {
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined) continue;
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (item !== undefined && item !== "") url.searchParams.append(k, item);
+      }
+    } else if (v !== "") {
+      url.searchParams.set(k, v);
     }
   }
+}
+
+export { invalidate as invalidateCache };
+
+export type QueryParams = Record<string, string | string[] | undefined>;
+
+export async function apiGet<T>(path: string, params?: QueryParams): Promise<T> {
+  const url = new URL(path, BASE_URL);
+  if (params) applyParams(url, params);
 
   const cacheKey = url.toString();
   const cached = getCached<T>(cacheKey);
@@ -41,15 +58,11 @@ export async function apiGet<T>(path: string, params?: Record<string, string>): 
 export async function apiPost<T>(
   path: string,
   body?: Record<string, string> | URLSearchParams,
-  params?: Record<string, string>
+  params?: QueryParams
 ): Promise<T> {
   const token = await ensureValidToken();
   const url = new URL(path, BASE_URL);
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== "") url.searchParams.set(k, v);
-    }
-  }
+  if (params) applyParams(url, params);
 
   let encodedBody: URLSearchParams | undefined;
   if (body instanceof URLSearchParams) {

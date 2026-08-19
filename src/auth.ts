@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { TokenData } from "./types.js";
@@ -39,8 +39,13 @@ function loadTokens(): TokenData | null {
 }
 
 function saveTokens(tokens: TokenData): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2), "utf-8");
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+  // writeFileSync mode only applies on create; enforce on every write
+  chmodSync(TOKEN_PATH, 0o600);
 }
 
 let cachedTokens: TokenData | null = null;

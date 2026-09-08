@@ -5,3 +5,5 @@ tokens.json
 *.tgz
 .claude/
 .mcp.json
+.dist-new/
+.dist-old/

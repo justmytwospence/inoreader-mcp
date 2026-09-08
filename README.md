@@ -11,13 +11,25 @@ Go to the [Inoreader Developer Portal](https://www.inoreader.com/developers/) an
 - Set the redirect URI to `http://localhost:3333/callback`
 - Note your **Client ID** and **Client Secret**
 
-### 2. Add to Claude Code
+### 2. Install
+
+This project is **not** published to npm. The name `inoreader-mcp` on the npm registry
+belongs to an unrelated project, so `npx inoreader-mcp` installs someone else's code.
+Build it from source instead:
+
+```bash
+git clone https://github.com/justmytwospence/inoreader-mcp
+cd inoreader-mcp
+npm install && npm run build
+```
+
+### 3. Add to Claude Code
 
 ```bash
 claude mcp add -s user \
   -e INOREADER_CLIENT_ID=your-client-id \
   -e INOREADER_CLIENT_SECRET=your-client-secret \
-  inoreader -- npx inoreader-mcp
+  inoreader -- node /absolute/path/to/inoreader-mcp/dist/index.js
 ```
 
 Or for Claude Desktop, add to your config file:
@@ -26,8 +38,8 @@ Or for Claude Desktop, add to your config file:
 {
   "mcpServers": {
     "inoreader": {
-      "command": "npx",
-      "args": ["inoreader-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/inoreader-mcp/dist/index.js"],
       "env": {
         "INOREADER_CLIENT_ID": "your-client-id",
         "INOREADER_CLIENT_SECRET": "your-client-secret"
@@ -37,7 +49,7 @@ Or for Claude Desktop, add to your config file:
 }
 ```
 
-### 3. Authenticate
+### 4. Authenticate
 
 On first use, ask Claude to call the `setup_auth` tool. It will give you an OAuth URL to open in your browser. After authorizing, copy the `code` parameter from the redirect URL and pass it back. Tokens are saved to `~/.config/inoreader-mcp/tokens.json` and refresh automatically.
 

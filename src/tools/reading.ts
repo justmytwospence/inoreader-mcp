@@ -423,19 +423,42 @@ export function registerReadingTools(server: McpServer): void {
     async (params) => {
       const compact = params.compact !== false;
 
+      // A stream for a label the account has never used does not exist, and
+      // Inoreader answers 400 rather than an empty list. Losing the whole union
+      // because one of three optional sources is absent is the wrong trade: an
+      // account with no "Keep" label could not call this tool at all.
+      const missing: string[] = [];
+      const streamOrEmpty = async (
+        stream: string,
+        params: Record<string, string>
+      ): Promise<StreamContentsResponse> => {
+        try {
+          return await apiGet<StreamContentsResponse>(
+            `/reader/api/0/stream/contents/${encodeURIComponent(stream)}`,
+            params
+          );
+        } catch {
+          missing.push(stream);
+          return {
+            direction: "ltr",
+            id: stream,
+            title: stream,
+            items: [],
+          } satisfies StreamContentsResponse;
+        }
+      };
+
       const [starredData, savedWebPagesData, keepData] = await Promise.all([
-        apiGet<StreamContentsResponse>(
-          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/reading-list")}`,
-          { output: "json", n: "1000", it: "user/-/state/com.google/starred" }
-        ),
-        apiGet<StreamContentsResponse>(
-          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/state/com.google/saved-web-pages")}`,
-          { output: "json", n: "1000" }
-        ),
-        apiGet<StreamContentsResponse>(
-          `/reader/api/0/stream/contents/${encodeURIComponent("user/-/label/Keep")}`,
-          { output: "json", n: "1000" }
-        ),
+        streamOrEmpty("user/-/state/com.google/reading-list", {
+          output: "json",
+          n: "1000",
+          it: "user/-/state/com.google/starred",
+        }),
+        streamOrEmpty("user/-/state/com.google/saved-web-pages", {
+          output: "json",
+          n: "1000",
+        }),
+        streamOrEmpty("user/-/label/Keep", { output: "json", n: "1000" }),
       ]);
 
       const starredItems = starredData.items ?? [];
@@ -474,6 +497,14 @@ export function registerReadingTools(server: McpServer): void {
                   saved_web_pages: savedWebPageIds.size,
                   keep: keepIds.size,
                 },
+                // Say which sources were unreadable rather than quietly
+                // returning a union that is missing one of its three parts.
+                ...(missing.length > 0
+                  ? {
+                      unavailable_collections: missing,
+                      note: "These streams could not be read (usually the label does not exist on this account) and contributed nothing to the union.",
+                    }
+                  : {}),
               },
               null,
               2

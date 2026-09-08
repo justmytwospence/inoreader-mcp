@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { apiGet, apiPost } from "../api.js";
+import { apiGet, apiPost, invalidateCache } from "../api.js";
 import { renderFolderWriteResult } from "../results.js";
 import { applyFolderIntents, type FolderIntent } from "../verify.js";
 import type { SubscriptionListResponse } from "../types.js";
@@ -362,7 +362,7 @@ export function registerSubscriptionTools(server: McpServer): void {
 
   server.tool(
     "manage_subscription",
-    "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request.",
+    "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request, plus 1 Zone 1 request on edit to read the result back. An edit returns the feed's resulting title and folders with an `applied` flag, so you can see whether the change landed -- if `applied` is true the work is done, do not repeat the call.",
     {
       action: z
         .enum(["subscribe", "edit", "unsubscribe"])
@@ -456,13 +456,75 @@ export function registerSubscriptionTools(server: McpServer): void {
       if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
       if (params.remove_from_folder) editBody.r = `user/-/label/${params.remove_from_folder}`;
 
-      await apiPost<string>("/reader/api/0/subscription/edit", editBody);
+      await apiPost<string>("/reader/api/0/subscription/edit", editBody, undefined, {
+        expectOk: true,
+      });
+
+      // Report the resulting state, not "a request was sent".
+      //
+      // This used to return a fixed `Updated subscription <id>` string. An agent
+      // that asked for a title change plus a folder had no way to see whether
+      // either landed, so on 2026-09-08 one called this nine times in a row on the
+      // same feed and burned its entire iteration budget without ever noticing the
+      // edit had already worked. One Zone 1 read ends that loop.
+      let actual: { title: string; folders: string[] } | null = null;
+      let verifyError: string | undefined;
+      try {
+        invalidateCache();
+        const data = await apiGet<SubscriptionListResponse>(
+          "/reader/api/0/subscription/list",
+          { output: "json" }
+        );
+        const sub = data.subscriptions.find((s) => s.id === params.stream_id);
+        if (sub) actual = { title: sub.title, folders: sub.categories.map((c) => c.label) };
+      } catch (e) {
+        verifyError = e instanceof Error ? e.message : String(e);
+      }
+
+      const wanted = {
+        ...(params.title ? { title: params.title } : {}),
+        ...(params.add_to_folder ? { in_folder: params.add_to_folder } : {}),
+        ...(params.remove_from_folder ? { not_in_folder: params.remove_from_folder } : {}),
+      };
+
+      const norm = (s: string) => s.trim().toLowerCase();
+      const applied =
+        actual !== null &&
+        (!params.title || norm(actual.title) === norm(params.title)) &&
+        (!params.add_to_folder ||
+          actual.folders.some((f) => norm(f) === norm(params.add_to_folder!))) &&
+        (!params.remove_from_folder ||
+          !actual.folders.some((f) => norm(f) === norm(params.remove_from_folder!)));
 
       return {
+        isError: actual !== null && !applied,
         content: [
           {
             type: "text" as const,
-            text: `Updated subscription ${params.stream_id}`,
+            text: JSON.stringify(
+              {
+                stream_id: params.stream_id,
+                requested: wanted,
+                applied,
+                current: actual ?? "unknown",
+                ...(verifyError
+                  ? {
+                      warning:
+                        `The edit was accepted but could not be verified (${verifyError}). ` +
+                        `Re-check with list_subscriptions before retrying -- it may already have applied.`,
+                    }
+                  : {}),
+                ...(actual !== null && !applied
+                  ? {
+                      note:
+                        "The server does not show the requested change. Do not simply repeat " +
+                        "this call; the same request has already been accepted once.",
+                    }
+                  : {}),
+              },
+              null,
+              2
+            ),
           },
         ],
       };

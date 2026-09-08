@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { apiGet } from "./api.js";
-import { getState } from "./rate-limit.js";
+import { snapshot } from "./rate-limit.js";
 import type {
   SubscriptionListResponse,
   UnreadCountResponse,
@@ -13,42 +13,16 @@ export function registerResources(server: McpServer): void {
     "inoreader://rate-limits",
     {
       description:
-        "Current API rate limit usage and remaining budget. Zero cost (reads cached response headers).",
+        "Current API rate limit usage and remaining budget. Reads persisted rate-limit state written by earlier calls; costs 0 requests.",
       mimeType: "application/json",
     },
     async (uri) => {
-      const state = getState();
-
-      const format = (zone: typeof state.zone1, name: string) => {
-        const remaining =
-          zone.limit > 0 ? zone.limit - zone.usage : "unknown";
-        const resetMin = Math.ceil(zone.resetAfterSec / 60);
-        const lastUpdated = zone.lastUpdated
-          ? new Date(zone.lastUpdated).toISOString()
-          : "never";
-        return {
-          zone: name,
-          used: zone.usage,
-          limit: zone.limit || "unknown",
-          remaining,
-          reset_in_minutes: resetMin,
-          last_updated: lastUpdated,
-        };
-      };
-
       return {
         contents: [
           {
             uri: uri.href,
             mimeType: "application/json" as const,
-            text: JSON.stringify(
-              {
-                zone1_reads: format(state.zone1, "reads"),
-                zone2_writes: format(state.zone2, "writes"),
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify(snapshot(), null, 2),
           },
         ],
       };

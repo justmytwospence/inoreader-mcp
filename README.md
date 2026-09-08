@@ -89,7 +89,7 @@ Thin wrappers around individual Inoreader API endpoints.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `get_user_info` | Authenticated user info | 1 Z1 |
-| `get_rate_limit_status` | Check remaining API budget (uses cached headers) | 0 |
+| `get_rate_limit_status` | Check remaining API budget (reads persisted state) | 0 |
 
 ### Composite tools
 
@@ -125,7 +125,8 @@ Starred articles, saved web pages, and Keep-tagged items are disjoint collection
 
 The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup without starring it. Use `get_saved_web_pages(filter='removable')` for pages that are neither starred nor kept.
 
-**Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Inoreader enforces ~100 requests/day per zone.
+**Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Call `get_rate_limit_status` for the live
+per-zone limit and usage rather than assuming a number.
 
 ## Prompts
 
@@ -186,7 +187,11 @@ This is a *selective labels* problem: you observe ground truth for articles the 
 
 ## Rate Limits
 
-Every tool description includes its API cost so Claude can budget calls. The `get_rate_limit_status` tool returns current usage without making any API requests. Inoreader's free tier allows ~100 requests per day per zone.
+Every tool description includes its API cost so Claude can budget calls. `get_rate_limit_status` reports live usage without making an API request, reading state
+persisted under `~/.config/inoreader-mcp/rate-limit.json` by earlier calls.
+
+Do not hardcode a daily limit. This README claimed ~100/zone/day for a long time; the
+account it was developed against actually reports 2000. Ask the tool.
 
 ## License
 

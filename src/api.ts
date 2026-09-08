@@ -1,10 +1,16 @@
 import { ensureValidToken } from "./auth.js";
 import { getCached, setCached, invalidate } from "./cache.js";
-import { updateFromHeaders } from "./rate-limit.js";
+import { noteRequest, updateFromHeaders } from "./rate-limit.js";
 
 const BASE_URL = "https://www.inoreader.com";
 
 export { invalidate as invalidateCache };
+
+// Zone is a property of the endpoint, not of the HTTP verb. Most POSTs are Zone 2
+// writes, but stream/items/contents is a POST purely because the id list is too
+// long for a query string -- it is a Zone 1 read. Deriving the zone from the method
+// would quietly mis-bill it against the write budget.
+const ZONE1_POST_PATHS = new Set(["/reader/api/0/stream/items/contents"]);
 
 export async function apiGet<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
   const url = new URL(path, BASE_URL);
@@ -25,6 +31,7 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
   if (cached !== null) return cached;
 
   const token = await ensureValidToken();
+  noteRequest(1);
   const res = await fetch(cacheKey, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -64,6 +71,7 @@ export async function apiPost<T>(
     encodedBody = new URLSearchParams(body);
   }
 
+  noteRequest(ZONE1_POST_PATHS.has(path) ? 1 : 2);
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: {

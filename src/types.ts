@@ -91,7 +91,23 @@ export interface UserInfoResponse {
   isMultiLoginEnabled: boolean;
 }
 
+/**
+ * `null` means "we have not been told", which is not the same as zero. Conflating
+ * the two is what hid the broken header names: a limit of 0 rendered as "unknown"
+ * and read like a display quirk rather than a parse failure.
+ */
+export interface ZoneState {
+  limit: number | null;
+  usage: number | null;
+  resetAfterSec: number | null;
+  lastUpdated: number;
+}
+
 export interface RateLimitState {
-  zone1: { limit: number; usage: number; resetAfterSec: number; lastUpdated: number };
-  zone2: { limit: number; usage: number; resetAfterSec: number; lastUpdated: number };
+  zone1: ZoneState;
+  zone2: ZoneState;
+  /** Requests this client made today. A floor; it cannot see other clients. */
+  local: { dayKey: string; zone1Count: number; zone2Count: number };
+  /** Any x-reader-* header we do not recognise, so a rename is visible. */
+  unknownHeaders: Record<string, string>;
 }

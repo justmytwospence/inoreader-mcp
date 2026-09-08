@@ -7,3 +7,4 @@ tokens.json
 .mcp.json
 .dist-new/
 .dist-old/
+.test-build/

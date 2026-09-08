@@ -95,9 +95,25 @@ function persist(state: RateLimitState): void {
  * again. Anything else beginning with `x-reader-` is stashed verbatim so a header we
  * do not know about yet shows up in get_rate_limit_status instead of vanishing.
  */
-export function updateFromHeaders(headers: Headers): void {
-  const state = load();
+export interface ParsedRateHeaders {
+  zone1: { limit: number | null; usage: number | null };
+  zone2: { limit: number | null; usage: number | null };
+  resetAfterSec: number | null;
+  /** x-reader-* headers we do not consume, so a rename is visible rather than silent. */
+  unknown: Record<string, string>;
+  /** True when at least one recognised value was present. */
+  saw: boolean;
+}
 
+/**
+ * Pure header parse, split out so it can be tested without touching disk.
+ *
+ * Reads both spellings per field. The old code read only `x-reader-limits-zone1`,
+ * which matches nothing Inoreader sends, so `limit` never left 0 -- and because the
+ * formatter rendered `limit || "unknown"`, the parse failure looked like a display
+ * quirk for months. Reading two names costs nothing and makes that unrepeatable.
+ */
+export function parseRateHeaders(headers: Headers): ParsedRateHeaders {
   const pick = (...names: string[]): string | null => {
     for (const n of names) {
       const v = headers.get(n);
@@ -106,57 +122,67 @@ export function updateFromHeaders(headers: Headers): void {
     return null;
   };
 
-  const z1Limit = pick("x-reader-zone1-limit", "x-reader-limits-zone1");
-  const z1Usage = pick("x-reader-zone1-usage", "x-reader-usage-zone1");
-  const z2Limit = pick("x-reader-zone2-limit", "x-reader-limits-zone2");
-  const z2Usage = pick("x-reader-zone2-usage", "x-reader-usage-zone2");
-  const resetAfter = pick("x-reader-limits-reset-after", "x-reader-zone1-reset-after");
-
   const num = (raw: string | null): number | null => {
     if (raw === null) return null;
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) ? n : null;
   };
 
-  let saw = false;
-  const apply = (zone: ZoneState, limit: number | null, usage: number | null) => {
-    if (limit !== null) {
-      zone.limit = limit;
-      saw = true;
-    }
-    if (usage !== null) {
-      zone.usage = usage;
-      saw = true;
-    }
+  const out: ParsedRateHeaders = {
+    zone1: {
+      limit: num(pick("x-reader-zone1-limit", "x-reader-limits-zone1")),
+      usage: num(pick("x-reader-zone1-usage", "x-reader-usage-zone1")),
+    },
+    zone2: {
+      limit: num(pick("x-reader-zone2-limit", "x-reader-limits-zone2")),
+      usage: num(pick("x-reader-zone2-usage", "x-reader-usage-zone2")),
+    },
+    resetAfterSec: num(pick("x-reader-limits-reset-after", "x-reader-zone1-reset-after")),
+    unknown: {},
+    saw: false,
   };
 
-  apply(state.zone1, num(z1Limit), num(z1Usage));
-  apply(state.zone2, num(z2Limit), num(z2Usage));
-
-  const reset = num(resetAfter);
-  if (reset !== null) {
-    state.zone1.resetAfterSec = reset;
-    state.zone2.resetAfterSec = reset;
-    saw = true;
-  }
+  out.saw =
+    out.zone1.limit !== null ||
+    out.zone1.usage !== null ||
+    out.zone2.limit !== null ||
+    out.zone2.usage !== null ||
+    out.resetAfterSec !== null;
 
   for (const [name, value] of headers.entries()) {
     const lower = name.toLowerCase();
     if (!lower.startsWith("x-reader-")) continue;
-    if (
-      lower.includes("zone1") ||
-      lower.includes("zone2") ||
-      lower === "x-reader-limits-reset-after"
-    ) {
-      continue;
-    }
-    state.unknownHeaders[lower] = value;
+    if (lower.includes("zone1") || lower.includes("zone2")) continue;
+    if (lower === "x-reader-limits-reset-after") continue;
+    out.unknown[lower] = value;
   }
+
+  return out;
+}
+
+export function updateFromHeaders(headers: Headers): void {
+  const parsed = parseRateHeaders(headers);
+  const state = load();
+
+  const apply = (zone: ZoneState, limit: number | null, usage: number | null) => {
+    if (limit !== null) zone.limit = limit;
+    if (usage !== null) zone.usage = usage;
+  };
+
+  apply(state.zone1, parsed.zone1.limit, parsed.zone1.usage);
+  apply(state.zone2, parsed.zone2.limit, parsed.zone2.usage);
+
+  if (parsed.resetAfterSec !== null) {
+    state.zone1.resetAfterSec = parsed.resetAfterSec;
+    state.zone2.resetAfterSec = parsed.resetAfterSec;
+  }
+
+  Object.assign(state.unknownHeaders, parsed.unknown);
 
   // Only claim freshness when a header actually arrived. The old code stamped
   // lastUpdated unconditionally, so the numbers looked current even when nothing
   // had refreshed them.
-  if (!saw) return;
+  if (!parsed.saw) return;
   const now = Date.now();
   state.zone1.lastUpdated = now;
   state.zone2.lastUpdated = now;

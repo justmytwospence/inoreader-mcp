@@ -11,7 +11,8 @@
   ],
   "scripts": {
     "build": "tsc --outDir .dist-new && rm -rf .dist-old && mv dist .dist-old 2>/dev/null; mv .dist-new dist && rm -rf .dist-old",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-build/test/*.test.js\""
   },
   "keywords": [
     "mcp",

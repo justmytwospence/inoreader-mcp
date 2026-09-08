@@ -203,6 +203,11 @@ export function registerOrganizationTools(server: McpServer): void {
           results.push({ index: i, article_count: op.article_ids.length, ok: false, error: "at least one of add_tag or remove_tag is required" });
           continue;
         }
+        // Pace the writes. This loop used to fire an unbounded number of Zone 2
+        // requests back to back with no delay and no retry; unpaced bursts are the
+        // leading suspect in a batch of folder edits that Inoreader accepted with a
+        // 200 and only half applied.
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 350));
         try {
           const searchParams = new URLSearchParams();
           for (const id of op.article_ids) {

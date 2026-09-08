@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { apiGet, invalidateCache } from "../api.js";
-import { snapshot } from "../rate-limit.js";
+import { snapshot, zoneRemaining } from "../rate-limit.js";
 import type {
   SubscriptionListResponse,
   UnreadCountResponse,
@@ -208,9 +208,31 @@ export function registerAnalyticsTools(server: McpServer): void {
       const BATCH_SIZE = 50;
       const sortBy = params.sort_by ?? "unengaged_per_month";
       const needsVolume = sortBy !== "engaged_count" && sortBy !== "title" && sortBy !== "days_since_newest";
+
+      // Volume counting is one Zone 1 request PER FEED and was previously uncapped:
+      // on a large account a single analyze_feeds call could eat the whole daily read
+      // budget by itself and leave every other tool failing for the rest of the day.
+      // Degrade loudly instead -- the ranking is weaker without volume, but a report
+      // that says so beats an exhausted budget nobody was told about.
+      const degraded: string[] = [];
+      const budgetFor = (want: number): number => {
+        const { remaining, source } = zoneRemaining(1);
+        if (remaining === null) return want; // nothing known; do not invent a limit
+        const spendable = Math.max(0, remaining - 25); // leave headroom for other tools
+        if (want <= spendable) return want;
+        degraded.push(
+          `Zone 1 budget: wanted ${want} volume requests, ${remaining} remaining ` +
+            `(per ${source}); counted ${spendable} and skipped ${want - spendable}. ` +
+            `Ranking by volume is less reliable for the skipped feeds.`
+        );
+        return spendable;
+      };
+
       if (needsVolume) {
-        for (let i = 0; i < engagedFeedIds.length; i += BATCH_SIZE) {
-          const batch = engagedFeedIds.slice(i, i + BATCH_SIZE);
+        const allowed = budgetFor(engagedFeedIds.length);
+        const todo = engagedFeedIds.slice(0, allowed);
+        for (let i = 0; i < todo.length; i += BATCH_SIZE) {
+          const batch = todo.slice(i, i + BATCH_SIZE);
           await Promise.all(batch.map(countFeedArticles));
         }
       }
@@ -237,8 +259,10 @@ export function registerAnalyticsTools(server: McpServer): void {
           .slice(0, volumeSample)
           .map((sub) => sub.id);
 
-        for (let i = 0; i < neverEngagedActive.length; i += BATCH_SIZE) {
-          const batch = neverEngagedActive.slice(i, i + BATCH_SIZE);
+        const sampleAllowed = budgetFor(neverEngagedActive.length);
+        const sampleTodo = neverEngagedActive.slice(0, sampleAllowed);
+        for (let i = 0; i < sampleTodo.length; i += BATCH_SIZE) {
+          const batch = sampleTodo.slice(i, i + BATCH_SIZE);
           await Promise.all(batch.map(countFeedArticles));
         }
       }
@@ -427,6 +451,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         engagement_tags_used: engagementTagIds.length,
         engagement_tag_ids: engagementTagIds,
         api_cost_z1: z1Cost,
+        ...(degraded.length > 0 ? { degraded } : {}),
         volume_feeds_counted: totalArticlesByFeed.size,
         prior: {
           strength: priorStrength,

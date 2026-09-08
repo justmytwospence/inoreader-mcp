@@ -43,7 +43,7 @@ On first use, ask Claude to call the `setup_auth` tool. It will give you an OAut
 
 ## Resources
 
-Context that MCP clients can read directly without tool calls. All are cached after first fetch.
+Context that MCP clients can read directly without tool calls.
 
 | Resource | URI | Description | API Cost |
 |----------|-----|-------------|----------|

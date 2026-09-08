@@ -34,7 +34,7 @@ export function registerResources(server: McpServer): void {
     "inoreader://subscriptions",
     {
       description:
-        "All RSS feed subscriptions with id, title, URL, and folder assignments. Costs 1 Zone 1 request (cached after first call).",
+        "All RSS feed subscriptions with id, title, URL, and folder assignments. Costs 1 Zone 1 request.",
       mimeType: "application/json",
     },
     async (uri) => {
@@ -72,7 +72,7 @@ export function registerResources(server: McpServer): void {
     "inoreader://folders",
     {
       description:
-        "Folder and tag structure. Costs 1 Zone 1 request (cached after first call).",
+        "Folder and tag structure. Costs 2 Zone 1 requests.",
       mimeType: "application/json",
     },
     async (uri) => {
@@ -122,7 +122,7 @@ export function registerResources(server: McpServer): void {
     "inoreader://unread-counts",
     {
       description:
-        "Unread article counts per feed and folder (non-zero only, sorted descending). Costs 1 Zone 1 request (cached after first call).",
+        "Unread article counts per feed and folder (non-zero only, sorted descending). Costs 1 Zone 1 request.",
       mimeType: "application/json",
     },
     async (uri) => {

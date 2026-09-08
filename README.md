@@ -92,7 +92,7 @@ Thin wrappers around individual Inoreader API endpoints.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `manage_tags` | Mark read/unread/starred, apply/remove tags (batch support) | 1 Z2 |
-| `batch_manage_tags` | Apply different tags to different article groups in one call — ideal for triage workflows | 1 Z2/op |
+| `batch_manage_tags` | Apply different tags to different article groups in one call — ideal for triage workflows. Verified. | 1 Z2 + 1 Z1 per 50 articles |
 | `mark_all_read` | Mark all items in a feed/folder as read | 1 Z2 |
 | `list_folders_and_tags` | All folders and tags with unread counts (unread only; use `get_article_ids` for totals) | 1 Z1 |
 
@@ -113,9 +113,9 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 |------|-------------|----------|
 | `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
 | `suggest_feed_cleanup` | Deterministic cleaned-up title proposals for uncategorized feeds — strips vendor boilerplate (`Blog on X`, `X's Blog`, trailing `RSS`/`Feed`, redundant site suffix). Read-only; apply with `manage_subscription`. | 1 Z1 |
-| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map | 1 Z2/feed |
-| `reassign_feeds` | Move feeds between folders in bulk | 1 Z2/feed |
-| `analyze_feeds` | Bayesian feed health analysis with category-level priors | 3+ Z1 |
+| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map. Verified. | 1 Z2/feed + 2 Z1 |
+| `reassign_feeds` | Move feeds between folders in bulk. Verified — a feed counts as moved only when it is in the destination *and* out of the source. | 1 Z2/feed + 2 Z1 |
+| `analyze_feeds` | Bayesian feed health analysis with category-level priors. Degrades and reports rather than exhausting the read budget. | 3 + pages [+ 1 Z1/feed for volume] |
 
 #### Saved items
 
@@ -123,7 +123,7 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 |------|-------------|----------|
 | `get_saved_items` | Union of starred articles + saved web pages + Keep-tagged items in one call. Deduplicates and adds `saved_via` field. Use instead of 3+ separate calls. | 3 Z1 |
 | `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged). Supports `compact=true`. | 1 Z1/page |
-| `remove_saved_web_pages` | Batch-remove saved pages by ID | 1 Z2 |
+| `remove_saved_web_pages` | Batch-remove saved pages by ID. Verified. | 1 Z2 + 1 Z1 per 50 |
 
 #### Classifier calibration
 
@@ -196,6 +196,38 @@ If you want to validate that the calibration curve extends below the decision th
 ### Why this is structured this way
 
 This is a *selective labels* problem: you observe ground truth for articles the LLM recommended (you read them), and not for articles it told you to skip (unless you audit). The calibration curve **on the recommended slice is fully identified** from observed data — that's the headline product, with per-bin Beta-Binomial posteriors and an isotonically-smoothed monotone curve. Below the decision threshold, behavior is unobserved without audits; that's why the threshold diagnostic only states an upper bound (via monotonicity) and the recall posterior only appears once `audit/*` tags exist.
+
+## Write verification
+
+Every bulk write reads its own result back and reports only what the server confirms.
+
+This exists because of a specific failure. A 42-feed `reassign_feeds` call returned
+`{"succeeded": 42, "failed": 0}` having actually moved 21: eleven feeds had not moved,
+and fourteen had been added to the destination without being removed from the source —
+from a single request carrying both `a=` and `r=` that Inoreader answered `200`. The
+discrepancy surfaced days later, by reading all 1818 subscriptions back by hand.
+
+Two things allowed it. `succeeded` counted HTTP 2xx responses rather than applied
+changes, and `by_folder` was built from the *input* map, so it could not represent a
+shortfall at all. Inoreader also returns `200 "OK"` for an edit to a feed that does not
+exist, so no amount of inspecting the request or its response can establish what
+happened. Only reading the state back can.
+
+So the bulk tools apply, wait, re-read, retry the shortfall once, and report:
+
+| Field | Meaning |
+|---|---|
+| `verified` | Confirmed present on the server |
+| `unverified` | The write returned 2xx but the server does not show the change |
+| `failed` | The write itself errored |
+| `not_attempted` | Skipped, e.g. budget |
+
+`isError` is set whenever `verified < intended`. **Trust `verified`, never the size of
+your request.** `unverified` is the bucket the old code reported as success.
+
+Verification is cheap for folder writes — `subscription/list` returns every feed with
+its labels in one request, so 4 feeds and 400 cost the same, in the zone that is not
+scarce. Article tags cost one read per 50.
 
 ## Rate Limits
 

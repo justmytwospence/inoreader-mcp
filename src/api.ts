@@ -6,11 +6,17 @@ const BASE_URL = "https://www.inoreader.com";
 
 export { invalidate as invalidateCache };
 
-export async function apiGet<T>(path: string, params?: Record<string, string>): Promise<T> {
+export async function apiGet<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
   const url = new URL(path, BASE_URL);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== "") url.searchParams.set(k, v);
+      if (Array.isArray(v)) {
+        for (const item of v) {
+          if (item !== undefined && item !== "") url.searchParams.append(k, item);
+        }
+      } else if (v !== undefined && v !== "") {
+        url.searchParams.set(k, v);
+      }
     }
   }
 

@@ -191,6 +191,64 @@ export function registerPrompts(server: McpServer): void {
   );
 
   server.registerPrompt(
+    "analyze-classifier",
+    {
+      title: "Analyze LLM classifier calibration",
+      description:
+        "Build a reliability diagram for the Inoreader Intelligence classifier on verified-tagged articles. Reports per-bin Beta-Binomial posteriors, ECE, monotonicity violations, threshold diagnostic, Manski FNR bounds, and an audit-conditional recall posterior when audit data exists.",
+      argsSchema: {
+        breakdown_by: z
+          .string()
+          .optional()
+          .describe(
+            "Comma-separated slices to additionally compute calibration on (feed, folder). Default: none.",
+          ),
+        bins: z
+          .string()
+          .optional()
+          .describe("Number of equal-width score bins (default 10)."),
+      },
+    },
+    (args) => {
+      const breakdownArg = args.breakdown_by
+        ? `, breakdown_by=[${args.breakdown_by
+            .split(",")
+            .map((s) => `"${s.trim()}"`)
+            .join(", ")}]`
+        : "";
+      const binsArg = args.bins ? `, bins=${args.bins}` : "";
+
+      return {
+        messages: [
+          {
+            role: "user" as const,
+            content: {
+              type: "text" as const,
+              text: [
+                "Analyze the calibration of my Inoreader Intelligence classifier.",
+                "",
+                "Steps:",
+                "1. Call extract_classifier_data first to inventory the verified set. If verified_count is below 30, stop and tell me to tag more articles (apply read/worth-it or read/not-worth-it after reading recommend-read articles, audit/worth-it or audit/not-worth-it after reading recommend-skip audits) before re-running this prompt.",
+                `2. Otherwise call analyze_classifier_calibration${binsArg}${breakdownArg} to get the reliability diagram.`,
+                "3. Present the per-bin reliability table with columns: bin range, n, k (worth-it count), posterior mean, 95% CI, smoothed mean, contains diagonal. Flag low_data bins.",
+                "4. Surface the diagnostics:",
+                "   - Precision (point estimate + CI) on the verified-recommended slice.",
+                "   - ECE: if > 0.1, the classifier is meaningfully miscalibrated.",
+                "   - Monotonicity violations: if any, the LLM is not rank-ordering articles cleanly. Suggest revising the prompt (more cautious framing, sharper criteria for 'read').",
+                "   - Threshold diagnostic: report the lowest-score recommend-read bin and what its posterior implies for below-threshold articles by monotonicity.",
+                "   - Manski FNR bounds (if include_population was used).",
+                "   - Audit-conditional recall posterior (if audit data exists). If absent, recommend running recommend_audit_articles and reading 5-10 to populate it.",
+                "5. If breakdown_by was set, briefly summarize which feeds or folders deviate from the overall calibration.",
+                "6. Conclude with a one-line health verdict: well-calibrated / miscalibrated-overconfident / miscalibrated-underconfident / not-yet-rank-ordered.",
+              ].join("\n"),
+            },
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerPrompt(
     "review-saved-web-pages",
     {
       title: "Review saved web pages",

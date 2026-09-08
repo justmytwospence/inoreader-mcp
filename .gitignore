@@ -3,3 +3,5 @@ dist/
 tokens.json
 .env
 *.tgz
+.claude/
+.mcp.json

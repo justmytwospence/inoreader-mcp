@@ -113,6 +113,14 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 | `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged). Supports `compact=true`. | 1 Z1/page |
 | `remove_saved_web_pages` | Batch-remove saved pages by ID | 1 Z2 |
 
+#### Classifier calibration
+
+| Tool | Description | API Cost |
+|------|-------------|----------|
+| `extract_classifier_data` | Pull Inoreader Intelligence summaries for verified-tagged articles, parse RECOMMENDATION + CONFIDENCE. Optional population scan for the score distribution. | ~4-8 Z1 (+population) |
+| `analyze_classifier_calibration` | Reliability diagram, ECE, monotonicity violations, threshold diagnostic, Manski FNR bounds, audit-conditional recall posterior | same as extract |
+| `recommend_audit_articles` | Active-learning suggestions for which recommend-skip articles to audit | same as extract |
+
 Starred articles, saved web pages, and Keep-tagged items are disjoint collections in the Inoreader API. `get_saved_items` fetches all three and deduplicates them. Each item includes a `saved_via` array (`["starred"]`, `["saved_web_page", "keep"]`, etc.) showing which collections it belongs to.
 
 The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup without starring it. Use `get_saved_web_pages(filter='removable')` for pages that are neither starred nor kept.
@@ -130,6 +138,51 @@ Pre-built workflows that combine resources and tools into guided tasks.
 | `organize-uncategorized` | Find feeds with no folder and suggest assignments | -- |
 | `summarize-recent` | Digest recent articles grouped by source with key themes | `folder?`, `hours?` |
 | `review-saved-web-pages` | Review saved pages, decide which to keep or remove | -- |
+| `analyze-classifier` | Build a reliability diagram for the Inoreader Intelligence classifier from verified-tagged articles | `breakdown_by?`, `bins?` |
+
+## Classifier calibration workflow
+
+If you use Inoreader Intelligence to classify articles as worth reading vs. skippable, the calibration tools let you treat that LLM as a binary classifier and analyze its reliability over time using only data already in Inoreader (no new LLM calls).
+
+### 1. Configure the prompt
+
+In Inoreader Intelligence settings, create a custom summary prompt:
+
+```
+Summarize this article in 2-3 sentences. Then on new lines, output exactly:
+
+RECOMMENDATION: read | skip
+CONFIDENCE: <integer 0-100>
+
+Be conservative — most articles are not worth reading in full. Recommend "read"
+only if the article likely contains substantive new information that cannot be
+obtained from the summary alone.
+```
+
+Optionally set up an Inoreader automation rule with the "Create summary" action so summaries are auto-generated for new articles in folders you care about.
+
+### 2. Tag articles after reading
+
+When you finish reading an article, apply one of these tags via `manage_tags` (forward slashes are part of the label name, not a folder hierarchy):
+
+| Tag | Meaning |
+|-----|---------|
+| `read/worth-it` | Opened a recommend-read article, was worth it (true positive) |
+| `read/not-worth-it` | Opened a recommend-read article, wasn't worth it (false positive) |
+| `audit/worth-it` | Opened a recommend-skip article as an audit, was worth it (false negative caught) |
+| `audit/not-worth-it` | Opened a recommend-skip article as an audit, wasn't worth it (true negative confirmed) |
+
+### 3. Run the analysis
+
+Call the `analyze-classifier` prompt periodically (or once verified counts pass ~30). It runs `extract_classifier_data`, then `analyze_classifier_calibration`, and walks you through the reliability diagram, ECE, monotonicity violations, and threshold diagnostic.
+
+### 4. Optionally audit
+
+If you want to validate that the calibration curve extends below the decision threshold, call `recommend_audit_articles`. It returns a small batch of recommend-skip articles weighted by where the calibration curve has the most uncertainty. Read them, apply the `audit/*` tags, and the next `analyze_classifier_calibration` run will produce a posterior over recall using that data.
+
+### Why this is structured this way
+
+This is a *selective labels* problem: you observe ground truth for articles the LLM recommended (you read them), and not for articles it told you to skip (unless you audit). The calibration curve **on the recommended slice is fully identified** from observed data — that's the headline product, with per-bin Beta-Binomial posteriors and an isotonically-smoothed monotone curve. Below the decision threshold, behavior is unobserved without audits; that's why the threshold diagnostic only states an upper bound (via monotonicity) and the recall posterior only appears once `audit/*` tags exist.
 
 ## Rate Limits
 

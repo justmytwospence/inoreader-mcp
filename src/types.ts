@@ -30,6 +30,16 @@ export interface UnreadCountResponse {
   unreadcounts: UnreadCount[];
 }
 
+export interface InoreaderIntelligenceSummary {
+  id: string;
+  prompt_id?: string;
+  prompt_name?: string;
+  custom_prompt?: string;
+  prompt_icon?: string;
+  summary: string;
+  is_mobilized?: number;
+}
+
 export interface ArticleItem {
   id: string;
   crawlTimeMsec: string;
@@ -38,6 +48,7 @@ export interface ArticleItem {
   updated?: number;
   title: string;
   summary?: { content: string };
+  summaries?: InoreaderIntelligenceSummary[];
   canonical?: Array<{ href: string }>;
   alternate?: Array<{ href: string }>;
   origin?: {

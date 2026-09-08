@@ -54,7 +54,8 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
 export async function apiPost<T>(
   path: string,
   body?: Record<string, string> | URLSearchParams,
-  params?: Record<string, string>
+  params?: Record<string, string>,
+  options?: { expectOk?: boolean }
 ): Promise<T> {
   const token = await ensureValidToken();
   const url = new URL(path, BASE_URL);
@@ -96,5 +97,21 @@ export async function apiPost<T>(
   if (contentType.includes("application/json")) {
     return res.json() as Promise<T>;
   }
-  return (await res.text()) as unknown as T;
+
+  const text = await res.text();
+  // Inoreader answers an applied edit with the literal body "OK" (verified against
+  // subscription/edit: 200, text/html, body exactly "OK"). A 2xx carrying anything
+  // else means the request was accepted but not necessarily applied, so throw and
+  // let the caller's retry path run rather than bank a phantom success.
+  //
+  // This is a cheap first filter, NOT a guarantee. Inoreader has been observed
+  // returning 200 while applying only half of a combined add+remove edit, which is
+  // why the bulk tools verify by reading state back regardless of what this says.
+  // Opt-in per call site: quickadd and stream/items/contents return other shapes.
+  if (options?.expectOk && text.trim() !== "OK") {
+    throw new Error(
+      `Inoreader returned ${res.status} on POST ${path} with unexpected body: ${text.slice(0, 200)}`
+    );
+  }
+  return text as unknown as T;
 }

@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
+import { renderFolderWriteResult } from "../results.js";
+import { applyFolderIntents, type FolderIntent } from "../verify.js";
 import type { SubscriptionListResponse } from "../types.js";
 
 // Vendor boilerplate that shows up in feed titles but carries no information.
@@ -96,38 +98,19 @@ const BatchEditSchema = z.array(
   })
 );
 
-async function assignFeedToFolder(
-  streamId: string,
-  folder: string
-): Promise<{ streamId: string; folder: string; ok: boolean; error?: string }> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await apiPost<string>("/reader/api/0/subscription/edit", {
-        ac: "edit",
-        s: streamId,
-        a: `user/-/label/${folder}`,
-      });
-      return { streamId, folder, ok: true };
-    } catch (e) {
-      if (attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      } else {
-        return {
-          streamId,
-          folder,
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        };
-      }
-    }
+/** Flatten a {folder: [streamId, ...]} map into intents. */
+function toIntents(assignments: Record<string, string[]>): FolderIntent[] {
+  const intents: FolderIntent[] = [];
+  for (const [folder, streamIds] of Object.entries(assignments)) {
+    for (const streamId of streamIds) intents.push({ streamId, folder });
   }
-  return { streamId, folder, ok: false, error: "unreachable" };
+  return intents;
 }
 
 export function registerSubscriptionTools(server: McpServer): void {
   server.tool(
     "batch_edit_subscriptions",
-    "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Each edit costs 1 Zone 2 request.",
+    "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reports only assignments confirmed present on the server.",
     {
       edits: BatchEditSchema.describe("Array of edits to apply"),
     },
@@ -137,35 +120,8 @@ export function registerSubscriptionTools(server: McpServer): void {
         if (!assignments[edit.add_to_folder]) assignments[edit.add_to_folder] = [];
         assignments[edit.add_to_folder].push(edit.stream_id);
       }
-
-      const pairs: { streamId: string; folder: string }[] = [];
-      for (const [folder, streamIds] of Object.entries(assignments)) {
-        for (const streamId of streamIds) {
-          pairs.push({ streamId, folder });
-        }
-      }
-
-      const results: { streamId: string; folder: string; ok: boolean; error?: string }[] = [];
-      const concurrency = 3;
-      for (let i = 0; i < pairs.length; i += concurrency) {
-        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 100));
-        const batch = pairs.slice(i, i + concurrency);
-        const batchResults = await Promise.all(
-          batch.map(({ streamId, folder }) => assignFeedToFolder(streamId, folder))
-        );
-        results.push(...batchResults);
-      }
-
-      const succeeded = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok).length;
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ succeeded, failed, details: failed > 0 ? results.filter((r) => !r.ok) : undefined }, null, 2),
-          },
-        ],
-      };
+      const report = await applyFolderIntents(toIntents(assignments));
+      return renderFolderWriteResult(report);
     }
   );
 
@@ -347,7 +303,7 @@ export function registerSubscriptionTools(server: McpServer): void {
 
   server.tool(
     "categorize_feeds",
-    "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Each feed assignment costs 1 Zone 2 request.",
+    "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reads the subscription list back afterwards and retries anything that did not land, so the counts reflect what is actually on the server; sets isError when fewer changes were confirmed than requested.",
     {
       assignments: z
         .record(
@@ -357,56 +313,14 @@ export function registerSubscriptionTools(server: McpServer): void {
         .describe("Map of folder name to array of stream IDs to assign"),
     },
     async (params) => {
-      const pairs: { streamId: string; folder: string }[] = [];
-      for (const [folder, streamIds] of Object.entries(params.assignments)) {
-        for (const streamId of streamIds) {
-          pairs.push({ streamId, folder });
-        }
-      }
-
-      const results: { streamId: string; folder: string; ok: boolean; error?: string }[] = [];
-      const concurrency = 3;
-
-      for (let i = 0; i < pairs.length; i += concurrency) {
-        if (i > 0) await new Promise((resolve) => setTimeout(resolve, 100));
-        const batch = pairs.slice(i, i + concurrency);
-        const batchResults = await Promise.all(
-          batch.map(({ streamId, folder }) => assignFeedToFolder(streamId, folder))
-        );
-        results.push(...batchResults);
-      }
-
-      const succeeded = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok).length;
-      const byFolder: Record<string, number> = {};
-      for (const [folder, streamIds] of Object.entries(params.assignments)) {
-        byFolder[folder] = streamIds.length;
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                total: pairs.length,
-                succeeded,
-                failed,
-                by_folder: byFolder,
-                errors: failed > 0 ? results.filter((r) => !r.ok) : undefined,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      const report = await applyFolderIntents(toIntents(params.assignments));
+      return renderFolderWriteResult(report);
     }
   );
 
   server.tool(
     "reassign_feeds",
-    "Move feeds from one folder to another in bulk. Each feed costs 1 Zone 2 request (the add and remove happen in a single API call). Pass from_folder and a map of {new_folder: [stream_id, ...]}.",
+    "Move feeds from one folder to another in bulk. Pass from_folder and a map of {new_folder: [stream_id, ...]}. Costs 1 Zone 2 request per feed (add and remove travel in one call), plus 2 Zone 1 requests to verify the result regardless of batch size. A feed counts as moved only when the subscription list shows it in the destination AND no longer in the source; anything short of that is retried with the add and remove split into separate calls, and reported as unverified with isError set if it still does not land.",
     {
       from_folder: z
         .string()
@@ -416,67 +330,10 @@ export function registerSubscriptionTools(server: McpServer): void {
         .describe("Map of new folder name to array of stream IDs to move there"),
     },
     async (params) => {
-      const pairs: { streamId: string; toFolder: string }[] = [];
-      for (const [toFolder, streamIds] of Object.entries(params.assignments)) {
-        for (const streamId of streamIds) {
-          pairs.push({ streamId, toFolder });
-        }
-      }
-
-      const results: { streamId: string; toFolder: string; ok: boolean; error?: string }[] = [];
-      const concurrency = 10;
-
-      for (let i = 0; i < pairs.length; i += concurrency) {
-        const batch = pairs.slice(i, i + concurrency);
-        const batchResults = await Promise.all(
-          batch.map(async ({ streamId, toFolder }) => {
-            try {
-              await apiPost<string>("/reader/api/0/subscription/edit", {
-                ac: "edit",
-                s: streamId,
-                a: `user/-/label/${toFolder}`,
-                r: `user/-/label/${params.from_folder}`,
-              });
-              return { streamId, toFolder, ok: true as const };
-            } catch (e) {
-              return {
-                streamId,
-                toFolder,
-                ok: false as const,
-                error: e instanceof Error ? e.message : String(e),
-              };
-            }
-          })
-        );
-        results.push(...batchResults);
-      }
-
-      const succeeded = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok).length;
-      const byFolder: Record<string, number> = {};
-      for (const [folder, streamIds] of Object.entries(params.assignments)) {
-        byFolder[folder] = streamIds.length;
-      }
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                from_folder: params.from_folder,
-                total: pairs.length,
-                succeeded,
-                failed,
-                by_folder: byFolder,
-                errors: failed > 0 ? results.filter((r) => !r.ok) : undefined,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      const report = await applyFolderIntents(toIntents(params.assignments), {
+        removeFrom: params.from_folder,
+      });
+      return renderFolderWriteResult(report, { from_folder: params.from_folder });
     }
   );
 

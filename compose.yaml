@@ -1,0 +1,25 @@
+# Self-host inoreader-mcp: `cp .env.example .env`, fill it in, `docker compose up -d`.
+# The MCP endpoint is then http://<host>:8000/mcp (Streamable HTTP).
+services:
+  inoreader-mcp:
+    image: ghcr.io/justmytwospence/inoreader-mcp:1
+    restart: unless-stopped
+    environment:
+      INOREADER_CLIENT_ID: ${INOREADER_CLIENT_ID:?set INOREADER_CLIENT_ID in .env}
+      INOREADER_CLIENT_SECRET: ${INOREADER_CLIENT_SECRET:?set INOREADER_CLIENT_SECRET in .env}
+      INOREADER_REDIRECT_URI: ${INOREADER_REDIRECT_URI:-}
+      NTFY_URL: ${NTFY_URL:-}
+      NTFY_TOPIC: ${NTFY_TOPIC:-}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+      # Hostnames clients use to reach the server, e.g. behind a reverse proxy.
+      # Requests naming any other Host are refused (DNS-rebinding protection).
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      # Token and rate-limit state; survives restarts so OAuth is a one-time step.
+      INOREADER_CONFIG_DIR: /data
+    volumes:
+      - inoreader-data:/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  inoreader-data:

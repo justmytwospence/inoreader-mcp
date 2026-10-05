@@ -53,6 +53,38 @@ Or for Claude Desktop, add to your config file:
 
 On first use, ask Claude to call the `setup_auth` tool. It will give you an OAuth URL to open in your browser. After authorizing, copy the `code` parameter from the redirect URL and pass it back. Tokens are saved to `~/.config/inoreader-mcp/tokens.json` and refresh automatically.
 
+### Or run it as a service (Docker)
+
+```sh
+cp .env.example .env   # fill in the INOREADER_* values
+docker compose up -d
+```
+
+The server then speaks [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28)
+at `http://<host>:8000/mcp` (also at `/`), with a health check at `/health`, for 2026-07-28 and
+older session-based clients alike. Running as a service adds two things a stdio process cannot do:
+
+- **It receives the OAuth redirect.** Set `INOREADER_REDIRECT_URI` (and the redirect URI on your
+  Inoreader app) to `https://<this server>/callback`. `setup_auth` then returns a link; authorize,
+  land on `/callback`, and the tokens are saved. Nothing to paste.
+- **It keeps the grant alive.** Inoreader's refresh token expires on its own after a couple of weeks
+  unused, so the server refreshes it every `INOREADER_KEEPALIVE_HOURS` (default 12) and, if
+  `NTFY_URL` + `NTFY_TOPIC` are set, pushes an alert when a refresh fails.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INOREADER_CLIENT_ID`, `INOREADER_CLIENT_SECRET` | (required) | Your Inoreader app |
+| `INOREADER_REDIRECT_URI` | `http://localhost:3333/callback` | Must byte-match the app's redirect URI |
+| `INOREADER_CONFIG_DIR` | `~/.config/inoreader-mcp` (`/data` in compose) | Token and rate-limit state |
+| `INOREADER_KEEPALIVE_HOURS` | `12` | Refresh interval in HTTP mode; `0` disables |
+| `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` | (unset) | Optional ntfy alerts for failed refreshes |
+| `MCP_TRANSPORT` | `stdio` (`http` in the image) | `stdio` or `http` |
+| `PORT` | `8000` | HTTP port |
+| `MCP_ALLOWED_HOSTS` | (any) | Comma-separated hostnames allowed in the `Host` header (set it behind a reverse proxy) |
+
+Images: `ghcr.io/justmytwospence/inoreader-mcp`, published for amd64 and arm64 by pushing a
+`vX.Y.Z` tag.
+
 ## Resources
 
 Context that MCP clients can read directly without tool calls.

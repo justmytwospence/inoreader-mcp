@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { TokenData } from "./types.js";
 
-const CONFIG_DIR = join(homedir(), ".config", "inoreader-mcp");
+// INOREADER_CONFIG_DIR relocates the token and rate-limit state, e.g. onto a container volume.
+const CONFIG_DIR = process.env.INOREADER_CONFIG_DIR ?? join(homedir(), ".config", "inoreader-mcp");
 const TOKEN_PATH = join(CONFIG_DIR, "tokens.json");
 
 const AUTH_URL = "https://www.inoreader.com/oauth2/auth";
@@ -195,6 +196,21 @@ export async function ensureValidToken(): Promise<string> {
   }
 
   return cachedTokens.access_token;
+}
+
+/**
+ * Refresh the stored grant now, whatever its expiry. Inoreader's refresh token dies on
+ * its own after a couple of weeks unused, so a long-running server refreshes on a timer
+ * (keepalive.ts) instead of only on demand. Returns false when there is nothing stored.
+ */
+export async function refreshStoredTokens(): Promise<boolean> {
+  const current = loadTokens() ?? cachedTokens;
+  if (!current) return false;
+  refreshInFlight ??= refreshAccessToken(current.refresh_token).finally(() => {
+    refreshInFlight = null;
+  });
+  cachedTokens = await refreshInFlight;
+  return true;
 }
 
 export function isAuthenticated(): boolean {

@@ -14,7 +14,7 @@ import type { RateLimitState, ZoneState } from "./types.js";
 //
 // This directory is the same one auth.ts keeps tokens.json in, and it is the only
 // writable path the container has (the code mount is :ro).
-const CONFIG_DIR = join(homedir(), ".config", "inoreader-mcp");
+const CONFIG_DIR = process.env.INOREADER_CONFIG_DIR ?? join(homedir(), ".config", "inoreader-mcp");
 const STATE_PATH = join(CONFIG_DIR, "rate-limit.json");
 
 function emptyZone(): ZoneState {

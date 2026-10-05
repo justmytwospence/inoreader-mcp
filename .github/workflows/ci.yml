@@ -4,7 +4,7 @@ on:
     branches: [main]
   pull_request:
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -13,4 +13,6 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
       - run: npm run build

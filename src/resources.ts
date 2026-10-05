@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import { apiGet } from "./api.js";
 import { snapshot } from "./rate-limit.js";
 import type {

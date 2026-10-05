@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, invalidateCache } from "../api.js";
 import type {
@@ -675,433 +675,418 @@ function thresholdDiagnostic(
 // ---------------------------------------------------------------------------
 
 export function registerCalibrationTools(server: McpServer): void {
-  server.tool(
-    "extract_classifier_data",
-    "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations. Caches per Inoreader URL; pass refresh=true to force re-fetch. Costs ~4-8 Zone 1 requests for the verified set (4 tag streams paginated up to 20 pages each, but typically 1-2 pages each), plus up to population_pages Zone 1 if include_population is true.",
-    {
-      prompt_name: z
-        .string()
-        .optional()
-        .describe(
-          "Inoreader Intelligence prompt_name to filter summaries by. If omitted, the parser scans all summaries on each article and uses the first that matches the RECOMMENDATION/CONFIDENCE format.",
-        ),
-      include_population: z
-        .boolean()
-        .optional()
-        .describe(
-          "Also fetch a window of articles (with summaries=1) to characterize the population score distribution. Default false. Required for recommend_audit_articles downstream.",
-        ),
-      population_folder: z
-        .string()
-        .optional()
-        .describe(
-          "Folder name to limit the population scan to. If omitted, scans the full reading-list stream.",
-        ),
-      population_months: z
-        .number()
-        .min(1)
-        .max(24)
-        .optional()
-        .describe("Window in months for the population scan (default 3)."),
-      population_pages: z
-        .number()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe("Per-stream page cap for the population scan (default 30)."),
-      refresh: z
-        .boolean()
-        .optional()
-        .describe("Clear the cache before fetching (default false)."),
-    },
-    async (params) => {
-      const result = await extractClassifierData(params);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    },
-  );
+  server.registerTool("extract_classifier_data", { description: "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations. Caches per Inoreader URL; pass refresh=true to force re-fetch. Costs ~4-8 Zone 1 requests for the verified set (4 tag streams paginated up to 20 pages each, but typically 1-2 pages each), plus up to population_pages Zone 1 if include_population is true.", inputSchema: z.object({
+              prompt_name: z
+                .string()
+                .optional()
+                .describe(
+                  "Inoreader Intelligence prompt_name to filter summaries by. If omitted, the parser scans all summaries on each article and uses the first that matches the RECOMMENDATION/CONFIDENCE format.",
+                ),
+              include_population: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Also fetch a window of articles (with summaries=1) to characterize the population score distribution. Default false. Required for recommend_audit_articles downstream.",
+                ),
+              population_folder: z
+                .string()
+                .optional()
+                .describe(
+                  "Folder name to limit the population scan to. If omitted, scans the full reading-list stream.",
+                ),
+              population_months: z
+                .number()
+                .min(1)
+                .max(24)
+                .optional()
+                .describe("Window in months for the population scan (default 3)."),
+              population_pages: z
+                .number()
+                .min(1)
+                .max(200)
+                .optional()
+                .describe("Per-stream page cap for the population scan (default 30)."),
+              refresh: z
+                .boolean()
+                .optional()
+                .describe("Clear the cache before fetching (default false)."),
+            }) }, async (params) => {
+              const result = await extractClassifierData(params);
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result, null, 2),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "analyze_classifier_calibration",
-    "Build a reliability diagram for the LLM classifier on the verified-recommended slice. Bins articles by CONFIDENCE score, computes per-bin Beta-Binomial posteriors with an empirical-Bayes prior from the marginal worth-it rate, and reports posterior mean + 95% credible interval per bin. Pool-adjacent-violators (isotonic regression, weighted by bin n) gives a monotone-smoothed curve for visualization; per-bin intervals are the source of truth for inference. Reports ECE, monotonicity violations, a threshold diagnostic (lowest-score recommend-read bin gives an upper bound on what's just below threshold by monotonicity), Manski-style FNR bounds (always identifiable), and an audit-conditional recall posterior via Monte Carlo when audit data exists. Optional per-feed and per-folder slices for multicalibration-lite. Calls extract_classifier_data internally; cost is the same as that call.",
-    {
-      prompt_name: z.string().optional().describe("Forwarded to extract_classifier_data."),
-      include_population: z
-        .boolean()
-        .optional()
-        .describe("Forwarded to extract_classifier_data."),
-      population_folder: z
-        .string()
-        .optional()
-        .describe("Forwarded to extract_classifier_data."),
-      population_months: z
-        .number()
-        .min(1)
-        .max(24)
-        .optional()
-        .describe("Forwarded to extract_classifier_data."),
-      population_pages: z
-        .number()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe("Forwarded to extract_classifier_data."),
-      refresh: z.boolean().optional().describe("Forwarded to extract_classifier_data."),
-      bins: z
-        .number()
-        .min(2)
-        .max(50)
-        .optional()
-        .describe("Number of equal-width score bins on 0-100 (default 10)."),
-      prior_strength: z
-        .number()
-        .min(1)
-        .max(50)
-        .optional()
-        .describe(
-          "Beta prior pseudo-observation count, allocated empirically from the marginal worth-it rate (default 4). Higher values shrink small-bin posteriors more aggressively toward the global mean.",
-        ),
-      breakdown_by: z
-        .array(z.enum(["feed", "folder"]))
-        .optional()
-        .describe(
-          "Additional slices to compute calibration on. Each slice with total n < min_bin_n is reported but flagged.",
-        ),
-      min_bin_n: z
-        .number()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Bins below this n are reported as low-data (default 3)."),
-      decision_threshold: z
-        .number()
-        .min(0)
-        .max(100)
-        .optional()
-        .describe(
-          "Score threshold for the diagnostic (default 50). Actual decisions are read from parsed RECOMMENDATION; this is only used to locate the diagnostic bin.",
-        ),
-    },
-    async (params) => {
-      const data = await extractClassifierData(params);
-      const binCount = params.bins ?? 10;
-      const priorStrength = params.prior_strength ?? 4;
-      const minBinN = params.min_bin_n ?? 3;
-      const threshold = params.decision_threshold ?? 50;
+  server.registerTool("analyze_classifier_calibration", { description: "Build a reliability diagram for the LLM classifier on the verified-recommended slice. Bins articles by CONFIDENCE score, computes per-bin Beta-Binomial posteriors with an empirical-Bayes prior from the marginal worth-it rate, and reports posterior mean + 95% credible interval per bin. Pool-adjacent-violators (isotonic regression, weighted by bin n) gives a monotone-smoothed curve for visualization; per-bin intervals are the source of truth for inference. Reports ECE, monotonicity violations, a threshold diagnostic (lowest-score recommend-read bin gives an upper bound on what's just below threshold by monotonicity), Manski-style FNR bounds (always identifiable), and an audit-conditional recall posterior via Monte Carlo when audit data exists. Optional per-feed and per-folder slices for multicalibration-lite. Calls extract_classifier_data internally; cost is the same as that call.", inputSchema: z.object({
+              prompt_name: z.string().optional().describe("Forwarded to extract_classifier_data."),
+              include_population: z
+                .boolean()
+                .optional()
+                .describe("Forwarded to extract_classifier_data."),
+              population_folder: z
+                .string()
+                .optional()
+                .describe("Forwarded to extract_classifier_data."),
+              population_months: z
+                .number()
+                .min(1)
+                .max(24)
+                .optional()
+                .describe("Forwarded to extract_classifier_data."),
+              population_pages: z
+                .number()
+                .min(1)
+                .max(200)
+                .optional()
+                .describe("Forwarded to extract_classifier_data."),
+              refresh: z.boolean().optional().describe("Forwarded to extract_classifier_data."),
+              bins: z
+                .number()
+                .min(2)
+                .max(50)
+                .optional()
+                .describe("Number of equal-width score bins on 0-100 (default 10)."),
+              prior_strength: z
+                .number()
+                .min(1)
+                .max(50)
+                .optional()
+                .describe(
+                  "Beta prior pseudo-observation count, allocated empirically from the marginal worth-it rate (default 4). Higher values shrink small-bin posteriors more aggressively toward the global mean.",
+                ),
+              breakdown_by: z
+                .array(z.enum(["feed", "folder"]))
+                .optional()
+                .describe(
+                  "Additional slices to compute calibration on. Each slice with total n < min_bin_n is reported but flagged.",
+                ),
+              min_bin_n: z
+                .number()
+                .min(1)
+                .max(100)
+                .optional()
+                .describe("Bins below this n are reported as low-data (default 3)."),
+              decision_threshold: z
+                .number()
+                .min(0)
+                .max(100)
+                .optional()
+                .describe(
+                  "Score threshold for the diagnostic (default 50). Actual decisions are read from parsed RECOMMENDATION; this is only used to locate the diagnostic bin.",
+                ),
+            }) }, async (params) => {
+              const data = await extractClassifierData(params);
+              const binCount = params.bins ?? 10;
+              const priorStrength = params.prior_strength ?? 4;
+              const minBinN = params.min_bin_n ?? 3;
+              const threshold = params.decision_threshold ?? 50;
 
-      const overall = computeCalibration(
-        data.verified,
-        binCount,
-        priorStrength,
-        minBinN,
-      );
-      const diag = thresholdDiagnostic(overall.bins, threshold);
+              const overall = computeCalibration(
+                data.verified,
+                binCount,
+                priorStrength,
+                minBinN,
+              );
+              const diag = thresholdDiagnostic(overall.bins, threshold);
 
-      // Precision: posterior on full verified-recommended slice
-      const recommended = data.verified.filter(
-        (r) => r.stratum === "recommended" && r.parse_status === "ok",
-      );
-      const recK = recommended.filter((r) => r.label === "worth-it").length;
-      const recN = recommended.length;
-      const precPriorAlpha = overall.prior.alpha;
-      const precPriorBeta = overall.prior.beta;
-      const precA = precPriorAlpha + recK;
-      const precB = precPriorBeta + (recN - recK);
-      const precision = {
-        n: recN,
-        k: recK,
-        posterior_mean: round4(precA / (precA + precB)),
-        ci_low: round4(betaQuantile(0.025, precA, precB)),
-        ci_high: round4(betaQuantile(0.975, precA, precB)),
-      };
+              // Precision: posterior on full verified-recommended slice
+              const recommended = data.verified.filter(
+                (r) => r.stratum === "recommended" && r.parse_status === "ok",
+              );
+              const recK = recommended.filter((r) => r.label === "worth-it").length;
+              const recN = recommended.length;
+              const precPriorAlpha = overall.prior.alpha;
+              const precPriorBeta = overall.prior.beta;
+              const precA = precPriorAlpha + recK;
+              const precB = precPriorBeta + (recN - recK);
+              const precision = {
+                n: recN,
+                k: recK,
+                posterior_mean: round4(precA / (precA + precB)),
+                ci_low: round4(betaQuantile(0.025, precA, precB)),
+                ci_high: round4(betaQuantile(0.975, precA, precB)),
+              };
 
-      // Manski recall bounds. Recall = TP / (TP + FN). TP = recK is observed.
-      // FN ranges from 0 (no skipped article was worth-it) to popSkip (all were).
-      // Only meaningful when include_population=true.
-      const popSkip = data.population.filter(
-        (r) => r.parse_status === "ok" && r.decision === "skip",
-      ).length;
-      const popRead = data.population.filter(
-        (r) => r.parse_status === "ok" && r.decision === "read",
-      ).length;
-      const recallBounds = popSkip > 0 && recK > 0
-        ? {
-            recall_low: round4(recK / (recK + popSkip)),
-            recall_high: 1,
-            n_skip_observed: popSkip,
-            n_read_observed: popRead,
-            n_recommended_worth_it: recK,
-            interpretation:
-              `Manski bounds: recall is at least ${(recK / (recK + popSkip)).toFixed(3)} ` +
-              `(if every recommend-skip article in the population scan were worth-it) and at most 1.0 ` +
-              `(if none were). Audit data tightens these via the recall_posterior below.`,
-          }
-        : null;
+              // Manski recall bounds. Recall = TP / (TP + FN). TP = recK is observed.
+              // FN ranges from 0 (no skipped article was worth-it) to popSkip (all were).
+              // Only meaningful when include_population=true.
+              const popSkip = data.population.filter(
+                (r) => r.parse_status === "ok" && r.decision === "skip",
+              ).length;
+              const popRead = data.population.filter(
+                (r) => r.parse_status === "ok" && r.decision === "read",
+              ).length;
+              const recallBounds = popSkip > 0 && recK > 0
+                ? {
+                    recall_low: round4(recK / (recK + popSkip)),
+                    recall_high: 1,
+                    n_skip_observed: popSkip,
+                    n_read_observed: popRead,
+                    n_recommended_worth_it: recK,
+                    interpretation:
+                      `Manski bounds: recall is at least ${(recK / (recK + popSkip)).toFixed(3)} ` +
+                      `(if every recommend-skip article in the population scan were worth-it) and at most 1.0 ` +
+                      `(if none were). Audit data tightens these via the recall_posterior below.`,
+                  }
+                : null;
 
-      // Audit-conditional recall posterior (Monte Carlo)
-      const auditRows = data.verified.filter(
-        (r) => r.stratum === "audit" && r.parse_status === "ok",
-      );
-      let recallPosterior: {
-        mean: number;
-        ci_low: number;
-        ci_high: number;
-        audit_n: number;
-        audit_k: number;
-      } | null = null;
+              // Audit-conditional recall posterior (Monte Carlo)
+              const auditRows = data.verified.filter(
+                (r) => r.stratum === "audit" && r.parse_status === "ok",
+              );
+              let recallPosterior: {
+                mean: number;
+                ci_low: number;
+                ci_high: number;
+                audit_n: number;
+                audit_k: number;
+              } | null = null;
 
-      if (auditRows.length > 0 && popSkip > 0 && popRead > 0) {
-        const auditK = auditRows.filter((r) => r.label === "worth-it").length;
-        const auditN = auditRows.length;
-        // Posterior on P(worth-it | D=skip)
-        const aSkip = overall.prior.alpha + auditK;
-        const bSkip = overall.prior.beta + (auditN - auditK);
-        // Posterior on P(worth-it | D=read) = precision
-        const aRead = precA;
-        const bRead = precB;
-        const draws = 10000;
-        const recallDraws: number[] = [];
-        for (let i = 0; i < draws; i++) {
-          const pRead = sampleBeta(aRead, bRead);
-          const pSkip = sampleBeta(aSkip, bSkip);
-          // recall = TP / (TP + FN) = (pRead * n_read) / (pRead * n_read + pSkip * n_skip)
-          const tp = pRead * popRead;
-          const fn = pSkip * popSkip;
-          const r = tp + fn > 0 ? tp / (tp + fn) : 0;
-          recallDraws.push(r);
-        }
-        recallDraws.sort((a, b) => a - b);
-        const meanR = recallDraws.reduce((s, x) => s + x, 0) / draws;
-        recallPosterior = {
-          mean: round4(meanR),
-          ci_low: round4(quantile(recallDraws, 0.025)),
-          ci_high: round4(quantile(recallDraws, 0.975)),
-          audit_n: auditN,
-          audit_k: auditK,
-        };
-      }
+              if (auditRows.length > 0 && popSkip > 0 && popRead > 0) {
+                const auditK = auditRows.filter((r) => r.label === "worth-it").length;
+                const auditN = auditRows.length;
+                // Posterior on P(worth-it | D=skip)
+                const aSkip = overall.prior.alpha + auditK;
+                const bSkip = overall.prior.beta + (auditN - auditK);
+                // Posterior on P(worth-it | D=read) = precision
+                const aRead = precA;
+                const bRead = precB;
+                const draws = 10000;
+                const recallDraws: number[] = [];
+                for (let i = 0; i < draws; i++) {
+                  const pRead = sampleBeta(aRead, bRead);
+                  const pSkip = sampleBeta(aSkip, bSkip);
+                  // recall = TP / (TP + FN) = (pRead * n_read) / (pRead * n_read + pSkip * n_skip)
+                  const tp = pRead * popRead;
+                  const fn = pSkip * popSkip;
+                  const r = tp + fn > 0 ? tp / (tp + fn) : 0;
+                  recallDraws.push(r);
+                }
+                recallDraws.sort((a, b) => a - b);
+                const meanR = recallDraws.reduce((s, x) => s + x, 0) / draws;
+                recallPosterior = {
+                  mean: round4(meanR),
+                  ci_low: round4(quantile(recallDraws, 0.025)),
+                  ci_high: round4(quantile(recallDraws, 0.975)),
+                  audit_n: auditN,
+                  audit_k: auditK,
+                };
+              }
 
-      // Per-feed / per-folder breakdowns
-      const breakdowns: Record<string, Record<string, CalibrationResult>> = {};
-      const breakdownBy = params.breakdown_by ?? [];
-      if (breakdownBy.includes("feed")) {
-        const byFeed = new Map<string, VerifiedRow[]>();
-        for (const r of data.verified) {
-          const key = r.feed_title ?? r.feed_id ?? "(unknown)";
-          if (!byFeed.has(key)) byFeed.set(key, []);
-          byFeed.get(key)!.push(r);
-        }
-        breakdowns.by_feed = {};
-        for (const [key, rows] of byFeed) {
-          breakdowns.by_feed[key] = computeCalibration(
-            rows,
-            binCount,
-            priorStrength,
-            minBinN,
-          );
-        }
-      }
-      if (breakdownBy.includes("folder")) {
-        const byFolder = new Map<string, VerifiedRow[]>();
-        for (const r of data.verified) {
-          if (r.folders.length === 0) {
-            if (!byFolder.has("(no folder)")) byFolder.set("(no folder)", []);
-            byFolder.get("(no folder)")!.push(r);
-          }
-          for (const f of r.folders) {
-            if (!byFolder.has(f)) byFolder.set(f, []);
-            byFolder.get(f)!.push(r);
-          }
-        }
-        breakdowns.by_folder = {};
-        for (const [key, rows] of byFolder) {
-          breakdowns.by_folder[key] = computeCalibration(
-            rows,
-            binCount,
-            priorStrength,
-            minBinN,
-          );
-        }
-      }
+              // Per-feed / per-folder breakdowns
+              const breakdowns: Record<string, Record<string, CalibrationResult>> = {};
+              const breakdownBy = params.breakdown_by ?? [];
+              if (breakdownBy.includes("feed")) {
+                const byFeed = new Map<string, VerifiedRow[]>();
+                for (const r of data.verified) {
+                  const key = r.feed_title ?? r.feed_id ?? "(unknown)";
+                  if (!byFeed.has(key)) byFeed.set(key, []);
+                  byFeed.get(key)!.push(r);
+                }
+                breakdowns.by_feed = {};
+                for (const [key, rows] of byFeed) {
+                  breakdowns.by_feed[key] = computeCalibration(
+                    rows,
+                    binCount,
+                    priorStrength,
+                    minBinN,
+                  );
+                }
+              }
+              if (breakdownBy.includes("folder")) {
+                const byFolder = new Map<string, VerifiedRow[]>();
+                for (const r of data.verified) {
+                  if (r.folders.length === 0) {
+                    if (!byFolder.has("(no folder)")) byFolder.set("(no folder)", []);
+                    byFolder.get("(no folder)")!.push(r);
+                  }
+                  for (const f of r.folders) {
+                    if (!byFolder.has(f)) byFolder.set(f, []);
+                    byFolder.get(f)!.push(r);
+                  }
+                }
+                breakdowns.by_folder = {};
+                for (const [key, rows] of byFolder) {
+                  breakdowns.by_folder[key] = computeCalibration(
+                    rows,
+                    binCount,
+                    priorStrength,
+                    minBinN,
+                  );
+                }
+              }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                calibration: {
-                  bins: overall.bins,
-                  monotonicity_violations: overall.monotonicity_violations,
-                  ece: overall.ece,
-                  total_n: overall.total_n,
-                  prior: overall.prior,
-                  threshold_diagnostic: diag,
-                },
-                precision,
-                recall_bounds: recallBounds,
-                recall_posterior: recallPosterior,
-                ...(breakdowns.by_feed ? { by_feed: breakdowns.by_feed } : {}),
-                ...(breakdowns.by_folder ? { by_folder: breakdowns.by_folder } : {}),
-                data_summary: data.summary,
-                api_cost_z1: data.summary.api_cost_z1,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        calibration: {
+                          bins: overall.bins,
+                          monotonicity_violations: overall.monotonicity_violations,
+                          ece: overall.ece,
+                          total_n: overall.total_n,
+                          prior: overall.prior,
+                          threshold_diagnostic: diag,
+                        },
+                        precision,
+                        recall_bounds: recallBounds,
+                        recall_posterior: recallPosterior,
+                        ...(breakdowns.by_feed ? { by_feed: breakdowns.by_feed } : {}),
+                        ...(breakdowns.by_folder ? { by_folder: breakdowns.by_folder } : {}),
+                        data_summary: data.summary,
+                        api_cost_z1: data.summary.api_cost_z1,
+                      },
+                      null,
+                      2,
+                    ),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "recommend_audit_articles",
-    "Suggest a small batch of recommend-skip articles to read as audits. Scores candidates by bin uncertainty (CI width on the calibration curve), proximity to the decision threshold, and (optionally) sparse audit coverage. Calls extract_classifier_data with include_population=true to find skip-recommended candidates and analyze_classifier_calibration to source per-bin uncertainty. Same Z1 cost as those calls. Already-audited articles are excluded.",
-    {
-      count: z
-        .number()
-        .min(1)
-        .max(50)
-        .optional()
-        .describe("Number of audit candidates to return (default 10)."),
-      decision_threshold: z
-        .number()
-        .min(0)
-        .max(100)
-        .optional()
-        .describe("Score threshold for proximity weighting (default 50)."),
-      feed: z
-        .string()
-        .optional()
-        .describe("Bias toward candidates from a specific feed (matches feed_title)."),
-      prefer_low_audit_coverage: z
-        .boolean()
-        .optional()
-        .describe(
-          "Bias toward feeds with few existing audit tags (default false). Useful for spreading audit coverage across feeds.",
-        ),
-      population_folder: z
-        .string()
-        .optional()
-        .describe("Folder for the population scan."),
-      population_months: z
-        .number()
-        .min(1)
-        .max(24)
-        .optional()
-        .describe("Window in months (default 3)."),
-      population_pages: z
-        .number()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe("Page cap (default 30)."),
-      bins: z
-        .number()
-        .min(2)
-        .max(50)
-        .optional()
-        .describe("Bin count for calibration (default 10)."),
-      prior_strength: z
-        .number()
-        .min(1)
-        .max(50)
-        .optional()
-        .describe("Beta prior strength (default 4)."),
-      refresh: z.boolean().optional(),
-    },
-    async (params) => {
-      const data = await extractClassifierData({
-        ...params,
-        include_population: true,
-      });
-      const binCount = params.bins ?? 10;
-      const priorStrength = params.prior_strength ?? 4;
-      const minBinN = 3;
-      const threshold = params.decision_threshold ?? 50;
-      const count = params.count ?? 10;
+  server.registerTool("recommend_audit_articles", { description: "Suggest a small batch of recommend-skip articles to read as audits. Scores candidates by bin uncertainty (CI width on the calibration curve), proximity to the decision threshold, and (optionally) sparse audit coverage. Calls extract_classifier_data with include_population=true to find skip-recommended candidates and analyze_classifier_calibration to source per-bin uncertainty. Same Z1 cost as those calls. Already-audited articles are excluded.", inputSchema: z.object({
+              count: z
+                .number()
+                .min(1)
+                .max(50)
+                .optional()
+                .describe("Number of audit candidates to return (default 10)."),
+              decision_threshold: z
+                .number()
+                .min(0)
+                .max(100)
+                .optional()
+                .describe("Score threshold for proximity weighting (default 50)."),
+              feed: z
+                .string()
+                .optional()
+                .describe("Bias toward candidates from a specific feed (matches feed_title)."),
+              prefer_low_audit_coverage: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Bias toward feeds with few existing audit tags (default false). Useful for spreading audit coverage across feeds.",
+                ),
+              population_folder: z
+                .string()
+                .optional()
+                .describe("Folder for the population scan."),
+              population_months: z
+                .number()
+                .min(1)
+                .max(24)
+                .optional()
+                .describe("Window in months (default 3)."),
+              population_pages: z
+                .number()
+                .min(1)
+                .max(200)
+                .optional()
+                .describe("Page cap (default 30)."),
+              bins: z
+                .number()
+                .min(2)
+                .max(50)
+                .optional()
+                .describe("Bin count for calibration (default 10)."),
+              prior_strength: z
+                .number()
+                .min(1)
+                .max(50)
+                .optional()
+                .describe("Beta prior strength (default 4)."),
+              refresh: z.boolean().optional(),
+            }) }, async (params) => {
+              const data = await extractClassifierData({
+                ...params,
+                include_population: true,
+              });
+              const binCount = params.bins ?? 10;
+              const priorStrength = params.prior_strength ?? 4;
+              const minBinN = 3;
+              const threshold = params.decision_threshold ?? 50;
+              const count = params.count ?? 10;
 
-      const calibration = computeCalibration(
-        data.verified,
-        binCount,
-        priorStrength,
-        minBinN,
-      );
-      const binCiWidth = calibration.bins.map((b) => b.ci_high - b.ci_low);
+              const calibration = computeCalibration(
+                data.verified,
+                binCount,
+                priorStrength,
+                minBinN,
+              );
+              const binCiWidth = calibration.bins.map((b) => b.ci_high - b.ci_low);
 
-      // Audit coverage per feed (count of existing audit/* tagged articles)
-      const auditByFeed = new Map<string, number>();
-      for (const r of data.verified) {
-        if (r.stratum === "audit") {
-          const key = r.feed_title ?? r.feed_id ?? "(unknown)";
-          auditByFeed.set(key, (auditByFeed.get(key) ?? 0) + 1);
-        }
-      }
+              // Audit coverage per feed (count of existing audit/* tagged articles)
+              const auditByFeed = new Map<string, number>();
+              for (const r of data.verified) {
+                if (r.stratum === "audit") {
+                  const key = r.feed_title ?? r.feed_id ?? "(unknown)";
+                  auditByFeed.set(key, (auditByFeed.get(key) ?? 0) + 1);
+                }
+              }
 
-      const candidates = data.population
-        .filter(
-          (r) =>
-            r.parse_status === "ok" &&
-            r.decision === "skip" &&
-            r.score !== null,
-        )
-        .map((r) => {
-          const score = r.score!;
-          const binIdx = Math.min(Math.floor((score / 100) * binCount), binCount - 1);
-          const ciWidth = binCiWidth[binIdx] ?? 0;
-          const proximity = 1 / (1 + Math.abs(score - threshold));
-          const feedKey = r.feed_title ?? r.feed_id ?? "(unknown)";
-          const auditCoverage = auditByFeed.get(feedKey) ?? 0;
-          const coverageBonus = params.prefer_low_audit_coverage
-            ? 1 / (1 + auditCoverage)
-            : 1;
-          const feedBoost = params.feed && params.feed === r.feed_title ? 2 : 1;
-          const acquisition = ciWidth * proximity * coverageBonus * feedBoost;
-          return { row: r, score, binIdx, ciWidth, proximity, acquisition };
-        })
-        .sort((a, b) => b.acquisition - a.acquisition)
-        .slice(0, count);
+              const candidates = data.population
+                .filter(
+                  (r) =>
+                    r.parse_status === "ok" &&
+                    r.decision === "skip" &&
+                    r.score !== null,
+                )
+                .map((r) => {
+                  const score = r.score!;
+                  const binIdx = Math.min(Math.floor((score / 100) * binCount), binCount - 1);
+                  const ciWidth = binCiWidth[binIdx] ?? 0;
+                  const proximity = 1 / (1 + Math.abs(score - threshold));
+                  const feedKey = r.feed_title ?? r.feed_id ?? "(unknown)";
+                  const auditCoverage = auditByFeed.get(feedKey) ?? 0;
+                  const coverageBonus = params.prefer_low_audit_coverage
+                    ? 1 / (1 + auditCoverage)
+                    : 1;
+                  const feedBoost = params.feed && params.feed === r.feed_title ? 2 : 1;
+                  const acquisition = ciWidth * proximity * coverageBonus * feedBoost;
+                  return { row: r, score, binIdx, ciWidth, proximity, acquisition };
+                })
+                .sort((a, b) => b.acquisition - a.acquisition)
+                .slice(0, count);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                candidates: candidates.map((c) => ({
-                  id: c.row.id,
-                  title: c.row.title,
-                  feed: c.row.feed_title,
-                  url_score: c.score,
-                  bin_index: c.binIdx,
-                  bin_ci_width: round4(c.ciWidth),
-                  proximity_to_threshold: round4(c.proximity),
-                  acquisition_value: round4(c.acquisition),
-                  summary_text: c.row.summary_text,
-                })),
-                instructions:
-                  "After reading, tag each article via manage_tags: add_tag='audit/worth-it' if it was worth reading, add_tag='audit/not-worth-it' otherwise. The audit/* tags become the labeled below-threshold data that updates the recall posterior on the next analyze_classifier_calibration run.",
-                params: {
-                  count,
-                  decision_threshold: threshold,
-                  prefer_low_audit_coverage: params.prefer_low_audit_coverage ?? false,
-                  feed: params.feed ?? null,
-                },
-                api_cost_z1: data.summary.api_cost_z1,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        candidates: candidates.map((c) => ({
+                          id: c.row.id,
+                          title: c.row.title,
+                          feed: c.row.feed_title,
+                          url_score: c.score,
+                          bin_index: c.binIdx,
+                          bin_ci_width: round4(c.ciWidth),
+                          proximity_to_threshold: round4(c.proximity),
+                          acquisition_value: round4(c.acquisition),
+                          summary_text: c.row.summary_text,
+                        })),
+                        instructions:
+                          "After reading, tag each article via manage_tags: add_tag='audit/worth-it' if it was worth reading, add_tag='audit/not-worth-it' otherwise. The audit/* tags become the labeled below-threshold data that updates the recall posterior on the next analyze_classifier_calibration run.",
+                        params: {
+                          count,
+                          decision_threshold: threshold,
+                          prefer_low_audit_coverage: params.prefer_low_audit_coverage ?? false,
+                          feed: params.feed ?? null,
+                        },
+                        api_cost_z1: data.summary.api_cost_z1,
+                      },
+                      null,
+                      2,
+                    ),
+                  },
+                ],
+              };
+            });
 }

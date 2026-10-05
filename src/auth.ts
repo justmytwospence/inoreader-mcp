@@ -26,6 +26,11 @@ function getRedirectUri(): string {
   return process.env.INOREADER_REDIRECT_URI ?? "http://localhost:3333/callback";
 }
 
+/** True when the redirect URI points somewhere that receives the code (HTTP mode's /callback). */
+export function hasCallbackReceiver(): boolean {
+  return Boolean(process.env.INOREADER_REDIRECT_URI) && process.env.MCP_TRANSPORT === "http";
+}
+
 function loadTokens(): TokenData | null {
   if (!existsSync(TOKEN_PATH)) return null;
   try {

@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
 import type {
@@ -58,506 +58,471 @@ function formatArticleCompact(item: ArticleItem) {
 }
 
 export function registerReadingTools(server: McpServer): void {
-  server.tool(
-    "get_unread_counts",
-    "Get unread article counts for all feeds and folders, sorted by count descending. Use this first to understand what needs attention. Costs 1 Zone 1 request.",
-    {},
-    async () => {
-      const data = await apiGet<UnreadCountResponse>(
-        "/reader/api/0/unread-count",
-        { output: "json" }
-      );
+  server.registerTool("get_unread_counts", { description: "Get unread article counts for all feeds and folders, sorted by count descending. Use this first to understand what needs attention. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
+              const data = await apiGet<UnreadCountResponse>(
+                "/reader/api/0/unread-count",
+                { output: "json" }
+              );
 
-      const counts = data.unreadcounts
-        .filter((c) => c.count > 0)
-        .sort((a, b) => b.count - a.count)
-        .map((c) => ({
-          id: c.id,
-          count: c.count,
-          newest_item: new Date(
-            parseInt(c.newestItemTimestampUsec) / 1000
-          ).toISOString(),
-        }));
+              const counts = data.unreadcounts
+                .filter((c) => c.count > 0)
+                .sort((a, b) => b.count - a.count)
+                .map((c) => ({
+                  id: c.id,
+                  count: c.count,
+                  newest_item: new Date(
+                    parseInt(c.newestItemTimestampUsec) / 1000
+                  ).toISOString(),
+                }));
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(counts, null, 2),
-          },
-        ],
-      };
-    }
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(counts, null, 2),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "get_articles",
-    "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page plus 1 for total_count (disable with include_total=false).",
-    {
-      stream_id: z
-        .string()
-        .optional()
-        .describe(
-          'Stream ID: feed URL (feed/http://...), folder (user/-/label/Name), system stream (user/-/state/com.google/starred), or saved web pages (user/-/state/com.google/saved-web-pages). Defaults to all items.'
-        ),
-      count: z
-        .number()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Number of articles to fetch (1-100, default 20)"),
-      order: z
-        .enum(["newest", "oldest"])
-        .optional()
-        .describe("Sort order (default: newest)"),
-      filter: z
-        .enum(["all", "unread", "starred"])
-        .optional()
-        .describe("Filter articles by status"),
-      since: z
-        .string()
-        .optional()
-        .describe("ISO date string - only return articles published after this date"),
-      continuation: z
-        .string()
-        .optional()
-        .describe("Continuation token for pagination (from previous response)"),
-      compact: z
-        .boolean()
-        .optional()
-        .describe("Return only id, title, source, is_starred, is_kept (default false). Use for triage workflows to avoid large responses."),
-      include_total: z
-        .boolean()
-        .optional()
-        .describe("Include total_count of all matching items across pages (default true). Set false to save 1 Zone 1 request."),
-    },
-    async (params) => {
-      const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
-      const queryParams: Record<string, string> = {
-        output: "json",
-        n: String(params.count ?? 20),
-      };
+  server.registerTool("get_articles", { description: "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page plus 1 for total_count (disable with include_total=false).", inputSchema: z.object({
+              stream_id: z
+                .string()
+                .optional()
+                .describe(
+                  'Stream ID: feed URL (feed/http://...), folder (user/-/label/Name), system stream (user/-/state/com.google/starred), or saved web pages (user/-/state/com.google/saved-web-pages). Defaults to all items.'
+                ),
+              count: z
+                .number()
+                .min(1)
+                .max(100)
+                .optional()
+                .describe("Number of articles to fetch (1-100, default 20)"),
+              order: z
+                .enum(["newest", "oldest"])
+                .optional()
+                .describe("Sort order (default: newest)"),
+              filter: z
+                .enum(["all", "unread", "starred"])
+                .optional()
+                .describe("Filter articles by status"),
+              since: z
+                .string()
+                .optional()
+                .describe("ISO date string - only return articles published after this date"),
+              continuation: z
+                .string()
+                .optional()
+                .describe("Continuation token for pagination (from previous response)"),
+              compact: z
+                .boolean()
+                .optional()
+                .describe("Return only id, title, source, is_starred, is_kept (default false). Use for triage workflows to avoid large responses."),
+              include_total: z
+                .boolean()
+                .optional()
+                .describe("Include total_count of all matching items across pages (default true). Set false to save 1 Zone 1 request."),
+            }) }, async (params) => {
+              const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
+              const queryParams: Record<string, string> = {
+                output: "json",
+                n: String(params.count ?? 20),
+              };
 
-      if (params.order === "oldest") queryParams.r = "o";
-      if (params.continuation) queryParams.c = params.continuation;
-      if (params.since) {
-        queryParams.ot = String(Math.floor(new Date(params.since).getTime() / 1000));
-      }
+              if (params.order === "oldest") queryParams.r = "o";
+              if (params.continuation) queryParams.c = params.continuation;
+              if (params.since) {
+                queryParams.ot = String(Math.floor(new Date(params.since).getTime() / 1000));
+              }
 
-      if (params.filter === "unread") {
-        queryParams.xt = "user/-/state/com.google/read";
-      } else if (params.filter === "starred") {
-        queryParams.it = "user/-/state/com.google/starred";
-      }
+              if (params.filter === "unread") {
+                queryParams.xt = "user/-/state/com.google/read";
+              } else if (params.filter === "starred") {
+                queryParams.it = "user/-/state/com.google/starred";
+              }
 
-      const includeTotal = params.include_total !== false;
-      const totalCountParams: Record<string, string> = {
-        output: "json",
-        n: "10000",
-        s: streamId,
-      };
-      if (queryParams.xt) totalCountParams.xt = queryParams.xt;
-      if (queryParams.it) totalCountParams.it = queryParams.it;
-      if (queryParams.ot) totalCountParams.ot = queryParams.ot;
+              const includeTotal = params.include_total !== false;
+              const totalCountParams: Record<string, string> = {
+                output: "json",
+                n: "10000",
+                s: streamId,
+              };
+              if (queryParams.xt) totalCountParams.xt = queryParams.xt;
+              if (queryParams.it) totalCountParams.it = queryParams.it;
+              if (queryParams.ot) totalCountParams.ot = queryParams.ot;
 
-      const [data, idsData] = await Promise.all([
-        apiGet<StreamContentsResponse>(
-          `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
-          queryParams
-        ),
-        includeTotal
-          ? apiGet<StreamItemIdsResponse>("/reader/api/0/stream/items/ids", totalCountParams)
-          : Promise.resolve(null),
-      ]);
+              const [data, idsData] = await Promise.all([
+                apiGet<StreamContentsResponse>(
+                  `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
+                  queryParams
+                ),
+                includeTotal
+                  ? apiGet<StreamItemIdsResponse>("/reader/api/0/stream/items/ids", totalCountParams)
+                  : Promise.resolve(null),
+              ]);
 
-      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
-      const items = data.items ?? [];
-      const result: Record<string, unknown> = {
-        articles: items.map(formatter),
-        continuation: data.continuation ?? null,
-        total_returned: items.length,
-      };
-      if (idsData !== null) result.total_count = (idsData.itemRefs ?? []).length;
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    }
-  );
-
-  server.tool(
-    "get_article_ids",
-    "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. For a middle ground with titles, use get_articles with compact=true instead. Costs 1 Zone 1 request.",
-    {
-      stream_id: z
-        .string()
-        .optional()
-        .describe("Stream ID (defaults to all items)"),
-      count: z
-        .number()
-        .min(1)
-        .max(10000)
-        .optional()
-        .describe("Number of IDs to fetch (default 1000, max 10000)"),
-      filter: z
-        .enum(["all", "unread", "starred"])
-        .optional()
-        .describe("Filter by status"),
-      since: z
-        .string()
-        .optional()
-        .describe("ISO date - only items after this date"),
-      continuation: z
-        .string()
-        .optional()
-        .describe("Continuation token for pagination"),
-    },
-    async (params) => {
-      const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
-      const queryParams: Record<string, string> = {
-        output: "json",
-        n: String(params.count ?? 1000),
-        s: streamId,
-      };
-
-      if (params.continuation) queryParams.c = params.continuation;
-      if (params.since) {
-        queryParams.ot = String(Math.floor(new Date(params.since).getTime() / 1000));
-      }
-      if (params.filter === "unread") {
-        queryParams.xt = "user/-/state/com.google/read";
-      } else if (params.filter === "starred") {
-        queryParams.it = "user/-/state/com.google/starred";
-      }
-
-      const data = await apiGet<StreamItemIdsResponse>(
-        "/reader/api/0/stream/items/ids",
-        queryParams
-      );
-
-      const itemRefs = data.itemRefs ?? [];
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                ids: itemRefs.map((r) => r.id),
-                count: itemRefs.length,
+              const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+              const items = data.items ?? [];
+              const result: Record<string, unknown> = {
+                articles: items.map(formatter),
                 continuation: data.continuation ?? null,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+                total_returned: items.length,
+              };
+              if (idsData !== null) result.total_count = (idsData.itemRefs ?? []).length;
 
-  server.tool(
-    "search_articles",
-    "Search for articles by keyword across all feeds. Costs 1 Zone 1 request per page. Uses undocumented but stable search endpoint.",
-    {
-      query: z.string().describe("Search query string"),
-      count: z
-        .number()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Number of results to return (1-100, default 20)"),
-      since: z
-        .string()
-        .optional()
-        .describe("ISO date string - only return articles published after this date"),
-      continuation: z
-        .string()
-        .optional()
-        .describe("Continuation token for pagination (from previous response)"),
-      compact: z
-        .boolean()
-        .optional()
-        .describe("Return only id, title, source, is_starred, is_kept (default false)."),
-    },
-    async (params) => {
-      const queryParams: Record<string, string> = {
-        output: "json",
-        n: String(params.count ?? 20),
-        q: params.query,
-      };
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result, null, 2),
+                  },
+                ],
+              };
+            });
 
-      if (params.continuation) queryParams.c = params.continuation;
-      if (params.since) {
-        queryParams.ot = String(
-          Math.floor(new Date(params.since).getTime() / 1000)
-        );
-      }
+  server.registerTool("get_article_ids", { description: "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. For a middle ground with titles, use get_articles with compact=true instead. Costs 1 Zone 1 request.", inputSchema: z.object({
+              stream_id: z
+                .string()
+                .optional()
+                .describe("Stream ID (defaults to all items)"),
+              count: z
+                .number()
+                .min(1)
+                .max(10000)
+                .optional()
+                .describe("Number of IDs to fetch (default 1000, max 10000)"),
+              filter: z
+                .enum(["all", "unread", "starred"])
+                .optional()
+                .describe("Filter by status"),
+              since: z
+                .string()
+                .optional()
+                .describe("ISO date - only items after this date"),
+              continuation: z
+                .string()
+                .optional()
+                .describe("Continuation token for pagination"),
+            }) }, async (params) => {
+              const streamId = params.stream_id ?? "user/-/state/com.google/reading-list";
+              const queryParams: Record<string, string> = {
+                output: "json",
+                n: String(params.count ?? 1000),
+                s: streamId,
+              };
 
-      const data = await apiGet<StreamContentsResponse>(
-        "/reader/api/0/stream/contents/user/-/state/com.google/search",
-        queryParams
-      );
+              if (params.continuation) queryParams.c = params.continuation;
+              if (params.since) {
+                queryParams.ot = String(Math.floor(new Date(params.since).getTime() / 1000));
+              }
+              if (params.filter === "unread") {
+                queryParams.xt = "user/-/state/com.google/read";
+              } else if (params.filter === "starred") {
+                queryParams.it = "user/-/state/com.google/starred";
+              }
 
-      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
-      const items = data.items ?? [];
-      const result = {
-        articles: items.map(formatter),
-        continuation: data.continuation ?? null,
-        total_returned: items.length,
-      };
+              const data = await apiGet<StreamItemIdsResponse>(
+                "/reader/api/0/stream/items/ids",
+                queryParams
+              );
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    }
-  );
+              const itemRefs = data.itemRefs ?? [];
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        ids: itemRefs.map((r) => r.id),
+                        count: itemRefs.length,
+                        continuation: data.continuation ?? null,
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "get_saved_web_pages",
-    "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Both count_only and listing apply the filter server-side via the Inoreader API. Set count_only=true to get just the filtered total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.",
-    {
-      filter: z
-        .enum(["all", "starred", "unstarred", "removable"])
-        .optional()
-        .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'Keep' -- the best filter for cleanup. 'unstarred' excludes starred only. The filter is applied server-side and respected by count_only."),
-      count: z
-        .number()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Number of pages to fetch (1-100, default 100)"),
-      count_only: z
-        .boolean()
-        .optional()
-        .describe("Return only the filtered total, not page details (default false). Uses lightweight IDs endpoint and respects 'filter'."),
-      continuation: z
-        .string()
-        .optional()
-        .describe("Continuation token for pagination"),
-      compact: z
-        .boolean()
-        .optional()
-        .describe("Return only id, title, source, is_starred, is_kept (default false)."),
-    },
-    async (params) => {
-      const streamId = "user/-/state/com.google/saved-web-pages";
-      const starredStream = "user/-/state/com.google/starred";
-      const keepStream = "user/-/label/Keep";
+  server.registerTool("search_articles", { description: "Search for articles by keyword across all feeds. Costs 1 Zone 1 request per page. Uses undocumented but stable search endpoint.", inputSchema: z.object({
+              query: z.string().describe("Search query string"),
+              count: z
+                .number()
+                .min(1)
+                .max(100)
+                .optional()
+                .describe("Number of results to return (1-100, default 20)"),
+              since: z
+                .string()
+                .optional()
+                .describe("ISO date string - only return articles published after this date"),
+              continuation: z
+                .string()
+                .optional()
+                .describe("Continuation token for pagination (from previous response)"),
+              compact: z
+                .boolean()
+                .optional()
+                .describe("Return only id, title, source, is_starred, is_kept (default false)."),
+            }) }, async (params) => {
+              const queryParams: Record<string, string> = {
+                output: "json",
+                n: String(params.count ?? 20),
+                q: params.query,
+              };
 
-      const filterParams: Record<string, string | string[]> = {};
-      if (params.filter === "starred") {
-        filterParams.it = starredStream;
-      } else if (params.filter === "unstarred") {
-        filterParams.xt = starredStream;
-      } else if (params.filter === "removable") {
-        filterParams.xt = [starredStream, keepStream];
-      }
+              if (params.continuation) queryParams.c = params.continuation;
+              if (params.since) {
+                queryParams.ot = String(
+                  Math.floor(new Date(params.since).getTime() / 1000)
+                );
+              }
 
-      if (params.count_only) {
-        const data = await apiGet<StreamItemIdsResponse>(
-          "/reader/api/0/stream/items/ids",
-          { s: streamId, n: "10000", output: "json", ...filterParams }
-        );
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ total: (data.itemRefs ?? []).length }, null, 2),
-            },
-          ],
-        };
-      }
+              const data = await apiGet<StreamContentsResponse>(
+                "/reader/api/0/stream/contents/user/-/state/com.google/search",
+                queryParams
+              );
 
-      const queryParams: Record<string, string | string[]> = {
-        output: "json",
-        n: String(params.count ?? 100),
-        ...filterParams,
-      };
+              const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+              const items = data.items ?? [];
+              const result = {
+                articles: items.map(formatter),
+                continuation: data.continuation ?? null,
+                total_returned: items.length,
+              };
 
-      if (params.continuation) queryParams.c = params.continuation;
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result, null, 2),
+                  },
+                ],
+              };
+            });
 
-      const data = await apiGet<StreamContentsResponse>(
-        `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
-        queryParams
-      );
+  server.registerTool("get_saved_web_pages", { description: "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Both count_only and listing apply the filter server-side via the Inoreader API. Set count_only=true to get just the filtered total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.", inputSchema: z.object({
+              filter: z
+                .enum(["all", "starred", "unstarred", "removable"])
+                .optional()
+                .describe("Filter pages (default: all). 'removable' returns pages that are neither starred nor tagged 'Keep' -- the best filter for cleanup. 'unstarred' excludes starred only. The filter is applied server-side and respected by count_only."),
+              count: z
+                .number()
+                .min(1)
+                .max(100)
+                .optional()
+                .describe("Number of pages to fetch (1-100, default 100)"),
+              count_only: z
+                .boolean()
+                .optional()
+                .describe("Return only the filtered total, not page details (default false). Uses lightweight IDs endpoint and respects 'filter'."),
+              continuation: z
+                .string()
+                .optional()
+                .describe("Continuation token for pagination"),
+              compact: z
+                .boolean()
+                .optional()
+                .describe("Return only id, title, source, is_starred, is_kept (default false)."),
+            }) }, async (params) => {
+              const streamId = "user/-/state/com.google/saved-web-pages";
+              const starredStream = "user/-/state/com.google/starred";
+              const keepStream = "user/-/label/Keep";
 
-      const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
-      const pages = (data.items ?? []).map(formatter);
+              const filterParams: Record<string, string | string[]> = {};
+              if (params.filter === "starred") {
+                filterParams.it = starredStream;
+              } else if (params.filter === "unstarred") {
+                filterParams.xt = starredStream;
+              } else if (params.filter === "removable") {
+                filterParams.xt = [starredStream, keepStream];
+              }
 
-      const result = {
-        pages,
-        continuation: data.continuation ?? null,
-        total_returned: pages.length,
-      };
+              if (params.count_only) {
+                const data = await apiGet<StreamItemIdsResponse>(
+                  "/reader/api/0/stream/items/ids",
+                  { s: streamId, n: "10000", output: "json", ...filterParams }
+                );
+                return {
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: JSON.stringify({ total: (data.itemRefs ?? []).length }, null, 2),
+                    },
+                  ],
+                };
+              }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-      };
-    }
-  );
+              const queryParams: Record<string, string | string[]> = {
+                output: "json",
+                n: String(params.count ?? 100),
+                ...filterParams,
+              };
 
-  server.tool(
-    "get_saved_items",
-    "Get all saved items in one call: union of starred articles, saved web pages, and Keep-tagged items. Deduplicates across collections and adds a saved_via field showing which collections each item belongs to. Use instead of making 3+ separate calls to piece together what the user sees as 'Saved'. Costs 3 Zone 1 requests.",
-    {
-      compact: z
-        .boolean()
-        .optional()
-        .describe("Return only id, title, source, is_starred, is_kept, saved_via (default true)."),
-    },
-    async (params) => {
-      const compact = params.compact !== false;
+              if (params.continuation) queryParams.c = params.continuation;
 
-      // A stream for a label the account has never used does not exist, and
-      // Inoreader answers 400 rather than an empty list. Losing the whole union
-      // because one of three optional sources is absent is the wrong trade: an
-      // account with no "Keep" label could not call this tool at all.
-      const missing: string[] = [];
-      const streamOrEmpty = async (
-        stream: string,
-        params: Record<string, string>
-      ): Promise<StreamContentsResponse> => {
-        try {
-          return await apiGet<StreamContentsResponse>(
-            `/reader/api/0/stream/contents/${encodeURIComponent(stream)}`,
-            params
-          );
-        } catch {
-          missing.push(stream);
-          return {
-            direction: "ltr",
-            id: stream,
-            title: stream,
-            items: [],
-          } satisfies StreamContentsResponse;
-        }
-      };
+              const data = await apiGet<StreamContentsResponse>(
+                `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
+                queryParams
+              );
 
-      const [starredData, savedWebPagesData, keepData] = await Promise.all([
-        streamOrEmpty("user/-/state/com.google/reading-list", {
-          output: "json",
-          n: "1000",
-          it: "user/-/state/com.google/starred",
-        }),
-        streamOrEmpty("user/-/state/com.google/saved-web-pages", {
-          output: "json",
-          n: "1000",
-        }),
-        streamOrEmpty("user/-/label/Keep", { output: "json", n: "1000" }),
-      ]);
+              const formatter: (item: ArticleItem) => Record<string, unknown> = params.compact ? formatArticleCompact : formatArticle;
+              const pages = (data.items ?? []).map(formatter);
 
-      const starredItems = starredData.items ?? [];
-      const savedWebPageItems = savedWebPagesData.items ?? [];
-      const keepItems = keepData.items ?? [];
-      const starredIds = new Set(starredItems.map((i) => i.id));
-      const savedWebPageIds = new Set(savedWebPageItems.map((i) => i.id));
-      const keepIds = new Set(keepItems.map((i) => i.id));
+              const result = {
+                pages,
+                continuation: data.continuation ?? null,
+                total_returned: pages.length,
+              };
 
-      const allItems = new Map<string, ArticleItem>();
-      for (const item of [...starredItems, ...savedWebPageItems, ...keepItems]) {
-        if (!allItems.has(item.id)) allItems.set(item.id, item);
-      }
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(result, null, 2),
+                  },
+                ],
+              };
+            });
 
-      const formatter = compact ? formatArticleCompact : formatArticle;
-      const items = Array.from(allItems.values())
-        .sort((a, b) => b.published - a.published)
-        .map((item) => {
-          const saved_via: string[] = [];
-          if (starredIds.has(item.id)) saved_via.push("starred");
-          if (savedWebPageIds.has(item.id)) saved_via.push("saved_web_page");
-          if (keepIds.has(item.id)) saved_via.push("keep");
-          return { ...formatter(item), saved_via };
-        });
+  server.registerTool("get_saved_items", { description: "Get all saved items in one call: union of starred articles, saved web pages, and Keep-tagged items. Deduplicates across collections and adds a saved_via field showing which collections each item belongs to. Use instead of making 3+ separate calls to piece together what the user sees as 'Saved'. Costs 3 Zone 1 requests.", inputSchema: z.object({
+              compact: z
+                .boolean()
+                .optional()
+                .describe("Return only id, title, source, is_starred, is_kept, saved_via (default true)."),
+            }) }, async (params) => {
+              const compact = params.compact !== false;
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                items,
-                total_count: items.length,
-                by_collection: {
-                  starred: starredIds.size,
-                  saved_web_pages: savedWebPageIds.size,
-                  keep: keepIds.size,
-                },
-                // Say which sources were unreadable rather than quietly
-                // returning a union that is missing one of its three parts.
-                ...(missing.length > 0
-                  ? {
-                      unavailable_collections: missing,
-                      note: "These streams could not be read (usually the label does not exist on this account) and contributed nothing to the union.",
-                    }
-                  : {}),
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+              // A stream for a label the account has never used does not exist, and
+              // Inoreader answers 400 rather than an empty list. Losing the whole union
+              // because one of three optional sources is absent is the wrong trade: an
+              // account with no "Keep" label could not call this tool at all.
+              const missing: string[] = [];
+              const streamOrEmpty = async (
+                stream: string,
+                params: Record<string, string>
+              ): Promise<StreamContentsResponse> => {
+                try {
+                  return await apiGet<StreamContentsResponse>(
+                    `/reader/api/0/stream/contents/${encodeURIComponent(stream)}`,
+                    params
+                  );
+                } catch {
+                  missing.push(stream);
+                  return {
+                    direction: "ltr",
+                    id: stream,
+                    title: stream,
+                    items: [],
+                  } satisfies StreamContentsResponse;
+                }
+              };
 
-  server.tool(
-    "get_article_content",
-    "Get full HTML content for specific articles by ID. Use after get_articles or search_articles to read full content. Costs 1 Zone 1 request.",
-    {
-      article_ids: z
-        .array(z.string())
-        .min(1)
-        .max(20)
-        .describe("Article IDs to fetch full content for (max 20)"),
-    },
-    async (params) => {
-      const searchParams = new URLSearchParams();
-      for (const id of params.article_ids) {
-        searchParams.append("i", id);
-      }
+              const [starredData, savedWebPagesData, keepData] = await Promise.all([
+                streamOrEmpty("user/-/state/com.google/reading-list", {
+                  output: "json",
+                  n: "1000",
+                  it: "user/-/state/com.google/starred",
+                }),
+                streamOrEmpty("user/-/state/com.google/saved-web-pages", {
+                  output: "json",
+                  n: "1000",
+                }),
+                streamOrEmpty("user/-/label/Keep", { output: "json", n: "1000" }),
+              ]);
 
-      const data = await apiPost<StreamItemContentsResponse>(
-        "/reader/api/0/stream/items/contents",
-        searchParams
-      );
+              const starredItems = starredData.items ?? [];
+              const savedWebPageItems = savedWebPagesData.items ?? [];
+              const keepItems = keepData.items ?? [];
+              const starredIds = new Set(starredItems.map((i) => i.id));
+              const savedWebPageIds = new Set(savedWebPageItems.map((i) => i.id));
+              const keepIds = new Set(keepItems.map((i) => i.id));
 
-      const articles = (data.items ?? []).map((item) => {
-        const url =
-          item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? "";
-        return {
-          id: item.id,
-          title: item.title,
-          url,
-          author: item.author ?? "",
-          published: new Date(item.published * 1000).toISOString(),
-          source: item.origin?.title ?? "",
-          content: item.summary?.content ?? "",
-        };
-      });
+              const allItems = new Map<string, ArticleItem>();
+              for (const item of [...starredItems, ...savedWebPageItems, ...keepItems]) {
+                if (!allItems.has(item.id)) allItems.set(item.id, item);
+              }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(articles, null, 2),
-          },
-        ],
-      };
-    }
-  );
+              const formatter = compact ? formatArticleCompact : formatArticle;
+              const items = Array.from(allItems.values())
+                .sort((a, b) => b.published - a.published)
+                .map((item) => {
+                  const saved_via: string[] = [];
+                  if (starredIds.has(item.id)) saved_via.push("starred");
+                  if (savedWebPageIds.has(item.id)) saved_via.push("saved_web_page");
+                  if (keepIds.has(item.id)) saved_via.push("keep");
+                  return { ...formatter(item), saved_via };
+                });
+
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        items,
+                        total_count: items.length,
+                        by_collection: {
+                          starred: starredIds.size,
+                          saved_web_pages: savedWebPageIds.size,
+                          keep: keepIds.size,
+                        },
+                        // Say which sources were unreadable rather than quietly
+                        // returning a union that is missing one of its three parts.
+                        ...(missing.length > 0
+                          ? {
+                              unavailable_collections: missing,
+                              note: "These streams could not be read (usually the label does not exist on this account) and contributed nothing to the union.",
+                            }
+                          : {}),
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            });
+
+  server.registerTool("get_article_content", { description: "Get full HTML content for specific articles by ID. Use after get_articles or search_articles to read full content. Costs 1 Zone 1 request.", inputSchema: z.object({
+              article_ids: z
+                .array(z.string())
+                .min(1)
+                .max(20)
+                .describe("Article IDs to fetch full content for (max 20)"),
+            }) }, async (params) => {
+              const searchParams = new URLSearchParams();
+              for (const id of params.article_ids) {
+                searchParams.append("i", id);
+              }
+
+              const data = await apiPost<StreamItemContentsResponse>(
+                "/reader/api/0/stream/items/contents",
+                searchParams
+              );
+
+              const articles = (data.items ?? []).map((item) => {
+                const url =
+                  item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? "";
+                return {
+                  id: item.id,
+                  title: item.title,
+                  url,
+                  author: item.author ?? "",
+                  published: new Date(item.published * 1000).toISOString(),
+                  source: item.origin?.title ?? "",
+                  content: item.summary?.content ?? "",
+                };
+              });
+
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(articles, null, 2),
+                  },
+                ],
+              };
+            });
 }

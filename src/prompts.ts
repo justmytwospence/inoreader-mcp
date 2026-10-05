@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 
 export function registerPrompts(server: McpServer): void {
@@ -8,7 +8,7 @@ export function registerPrompts(server: McpServer): void {
       title: "Triage unread articles",
       description:
         "Review unread articles, summarize each, and suggest whether to read, star, or skip.",
-      argsSchema: {
+      argsSchema: z.object({
         folder: z
           .string()
           .optional()
@@ -17,7 +17,7 @@ export function registerPrompts(server: McpServer): void {
           .string()
           .optional()
           .describe("Max articles to review (default 20)"),
-      },
+      }),
     },
     (args) => {
       const count = args.count ?? "20";
@@ -59,7 +59,7 @@ export function registerPrompts(server: McpServer): void {
       title: "Review feed health",
       description:
         "Analyze feed engagement and identify candidates for unsubscribe or reorganization.",
-      argsSchema: {
+      argsSchema: z.object({
         months: z
           .string()
           .optional()
@@ -68,7 +68,7 @@ export function registerPrompts(server: McpServer): void {
           .string()
           .optional()
           .describe("Limit analysis to feeds in this folder"),
-      },
+      }),
     },
     (args) => {
       const months = args.months ?? "12";
@@ -145,7 +145,7 @@ export function registerPrompts(server: McpServer): void {
       title: "Summarize recent articles",
       description:
         "Digest of recent articles grouped by source with key themes highlighted.",
-      argsSchema: {
+      argsSchema: z.object({
         folder: z
           .string()
           .optional()
@@ -154,7 +154,7 @@ export function registerPrompts(server: McpServer): void {
           .string()
           .optional()
           .describe("Look back this many hours (default 24)"),
-      },
+      }),
     },
     (args) => {
       const hours = parseInt(args.hours ?? "24", 10);
@@ -196,7 +196,7 @@ export function registerPrompts(server: McpServer): void {
       title: "Analyze LLM classifier calibration",
       description:
         "Build a reliability diagram for the Inoreader Intelligence classifier on verified-tagged articles. Reports per-bin Beta-Binomial posteriors, ECE, monotonicity violations, threshold diagnostic, Manski FNR bounds, and an audit-conditional recall posterior when audit data exists.",
-      argsSchema: {
+      argsSchema: z.object({
         breakdown_by: z
           .string()
           .optional()
@@ -207,7 +207,7 @@ export function registerPrompts(server: McpServer): void {
           .string()
           .optional()
           .describe("Number of equal-width score bins (default 10)."),
-      },
+      }),
     },
     (args) => {
       const breakdownArg = args.breakdown_by

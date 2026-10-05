@@ -1,4 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost, invalidateCache } from "../api.js";
 import { renderFolderWriteResult } from "../results.js";
@@ -108,426 +108,386 @@ function toIntents(assignments: Record<string, string[]>): FolderIntent[] {
 }
 
 export function registerSubscriptionTools(server: McpServer): void {
-  server.tool(
-    "batch_edit_subscriptions",
-    "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reports only assignments confirmed present on the server.",
-    {
-      edits: BatchEditSchema.describe("Array of edits to apply"),
-    },
-    async (params) => {
-      const assignments: Record<string, string[]> = {};
-      for (const edit of params.edits) {
-        if (!assignments[edit.add_to_folder]) assignments[edit.add_to_folder] = [];
-        assignments[edit.add_to_folder].push(edit.stream_id);
-      }
-      const report = await applyFolderIntents(toIntents(assignments));
-      return renderFolderWriteResult(report);
-    }
-  );
+  server.registerTool("batch_edit_subscriptions", { description: "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reports only assignments confirmed present on the server.", inputSchema: z.object({
+              edits: BatchEditSchema.describe("Array of edits to apply"),
+            }) }, async (params) => {
+              const assignments: Record<string, string[]> = {};
+              for (const edit of params.edits) {
+                if (!assignments[edit.add_to_folder]) assignments[edit.add_to_folder] = [];
+                assignments[edit.add_to_folder].push(edit.stream_id);
+              }
+              const report = await applyFolderIntents(toIntents(assignments));
+              return renderFolderWriteResult(report);
+            });
 
-  server.tool(
-    "list_subscriptions",
-    "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.",
-    {
-      folder: z
-        .string()
-        .optional()
-        .describe("Filter to subscriptions in this folder name"),
-      search: z
-        .string()
-        .optional()
-        .describe("Filter by title or URL (case-insensitive substring match)"),
-      limit: z
-        .number()
-        .min(1)
-        .max(500)
-        .optional()
-        .describe("Max subscriptions to return (default 100)"),
-      offset: z
-        .number()
-        .min(0)
-        .optional()
-        .describe("Number of subscriptions to skip (default 0)"),
-    },
-    async (params) => {
-      const data = await apiGet<SubscriptionListResponse>(
-        "/reader/api/0/subscription/list",
-        { output: "json" }
-      );
+  server.registerTool("list_subscriptions", { description: "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.", inputSchema: z.object({
+              folder: z
+                .string()
+                .optional()
+                .describe("Filter to subscriptions in this folder name"),
+              search: z
+                .string()
+                .optional()
+                .describe("Filter by title or URL (case-insensitive substring match)"),
+              limit: z
+                .number()
+                .min(1)
+                .max(500)
+                .optional()
+                .describe("Max subscriptions to return (default 100)"),
+              offset: z
+                .number()
+                .min(0)
+                .optional()
+                .describe("Number of subscriptions to skip (default 0)"),
+            }) }, async (params) => {
+              const data = await apiGet<SubscriptionListResponse>(
+                "/reader/api/0/subscription/list",
+                { output: "json" }
+              );
 
-      let subs = data.subscriptions.map((s) => ({
-        id: s.id,
-        title: s.title,
-        feed_url: s.url,
-        site_url: s.htmlUrl,
-        folders: s.categories.map((c) => c.label),
-      }));
+              let subs = data.subscriptions.map((s) => ({
+                id: s.id,
+                title: s.title,
+                feed_url: s.url,
+                site_url: s.htmlUrl,
+                folders: s.categories.map((c) => c.label),
+              }));
 
-      if (params.folder) {
-        subs = subs.filter((s) =>
-          s.folders.some(
-            (f) => f.toLowerCase() === params.folder!.toLowerCase()
-          )
-        );
-      }
+              if (params.folder) {
+                subs = subs.filter((s) =>
+                  s.folders.some(
+                    (f) => f.toLowerCase() === params.folder!.toLowerCase()
+                  )
+                );
+              }
 
-      if (params.search) {
-        const q = params.search.toLowerCase();
-        subs = subs.filter(
-          (s) =>
-            s.title.toLowerCase().includes(q) ||
-            s.feed_url.toLowerCase().includes(q) ||
-            s.site_url.toLowerCase().includes(q)
-        );
-      }
+              if (params.search) {
+                const q = params.search.toLowerCase();
+                subs = subs.filter(
+                  (s) =>
+                    s.title.toLowerCase().includes(q) ||
+                    s.feed_url.toLowerCase().includes(q) ||
+                    s.site_url.toLowerCase().includes(q)
+                );
+              }
 
-      const total = subs.length;
-      const offset = params.offset ?? 0;
-      const limit = params.limit ?? 100;
-      const page = subs.slice(offset, offset + limit);
+              const total = subs.length;
+              const offset = params.offset ?? 0;
+              const limit = params.limit ?? 100;
+              const page = subs.slice(offset, offset + limit);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              subscriptions: page,
-              total,
-              showing: `${offset + 1}-${offset + page.length} of ${total}`,
-              ...(offset + page.length < total
-                ? { next_offset: offset + limit }
-                : {}),
-            }),
-          },
-        ],
-      };
-    }
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify({
+                      subscriptions: page,
+                      total,
+                      showing: `${offset + 1}-${offset + page.length} of ${total}`,
+                      ...(offset + page.length < total
+                        ? { next_offset: offset + limit }
+                        : {}),
+                    }),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "suggest_feed_cleanup",
-    "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.",
-    {
-      include_unchanged: z
-        .boolean()
-        .optional()
-        .describe(
-          "Include feeds whose title already needs no change (default false)"
-        ),
-    },
-    async (params) => {
-      const data = await apiGet<SubscriptionListResponse>(
-        "/reader/api/0/subscription/list",
-        { output: "json" }
-      );
+  server.registerTool("suggest_feed_cleanup", { description: "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.", inputSchema: z.object({
+              include_unchanged: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Include feeds whose title already needs no change (default false)"
+                ),
+            }) }, async (params) => {
+              const data = await apiGet<SubscriptionListResponse>(
+                "/reader/api/0/subscription/list",
+                { output: "json" }
+              );
 
-      const uncategorized = data.subscriptions.filter(
-        (s) => s.categories.length === 0
-      );
+              const uncategorized = data.subscriptions.filter(
+                (s) => s.categories.length === 0
+              );
 
-      const feeds = uncategorized
-        .map((s) => {
-          const proposed = normalizeFeedTitle(s.title, s.htmlUrl);
-          return {
-            stream_id: s.id,
-            current_title: s.title,
-            proposed_title: proposed,
-            site_url: s.htmlUrl,
-            changed: proposed !== s.title,
-          };
-        })
-        .filter((f) => (params.include_unchanged ? true : f.changed));
+              const feeds = uncategorized
+                .map((s) => {
+                  const proposed = normalizeFeedTitle(s.title, s.htmlUrl);
+                  return {
+                    stream_id: s.id,
+                    current_title: s.title,
+                    proposed_title: proposed,
+                    site_url: s.htmlUrl,
+                    changed: proposed !== s.title,
+                  };
+                })
+                .filter((f) => (params.include_unchanged ? true : f.changed));
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                uncategorized_count: uncategorized.length,
-                rename_count: feeds.filter((f) => f.changed).length,
-                feeds,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        uncategorized_count: uncategorized.length,
+                        rename_count: feeds.filter((f) => f.changed).length,
+                        feeds,
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "get_uncategorized_feeds",
-    "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.",
-    {
-      include_url: z
-        .boolean()
-        .optional()
-        .describe("Include site URL as a third tuple element (default false)"),
-    },
-    async (params) => {
-      const data = await apiGet<SubscriptionListResponse>(
-        "/reader/api/0/subscription/list",
-        { output: "json" }
-      );
+  server.registerTool("get_uncategorized_feeds", { description: "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.", inputSchema: z.object({
+              include_url: z
+                .boolean()
+                .optional()
+                .describe("Include site URL as a third tuple element (default false)"),
+            }) }, async (params) => {
+              const data = await apiGet<SubscriptionListResponse>(
+                "/reader/api/0/subscription/list",
+                { output: "json" }
+              );
 
-      const uncategorized = data.subscriptions.filter(
-        (s) => s.categories.length === 0
-      );
+              const uncategorized = data.subscriptions.filter(
+                (s) => s.categories.length === 0
+              );
 
-      const feeds = uncategorized.map((s) =>
-        params.include_url
-          ? [s.id, s.title, s.htmlUrl]
-          : [s.id, s.title]
-      );
+              const feeds = uncategorized.map((s) =>
+                params.include_url
+                  ? [s.id, s.title, s.htmlUrl]
+                  : [s.id, s.title]
+              );
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                uncategorized_count: uncategorized.length,
-                total_count: data.subscriptions.length,
-                feeds,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        uncategorized_count: uncategorized.length,
+                        total_count: data.subscriptions.length,
+                        feeds,
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "categorize_feeds",
-    "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reads the subscription list back afterwards and retries anything that did not land, so the counts reflect what is actually on the server; sets isError when fewer changes were confirmed than requested.",
-    {
-      assignments: z
-        .record(
-          z.string(),
-          z.array(z.string())
-        )
-        .describe("Map of folder name to array of stream IDs to assign"),
-    },
-    async (params) => {
-      const report = await applyFolderIntents(toIntents(params.assignments));
-      return renderFolderWriteResult(report);
-    }
-  );
+  server.registerTool("categorize_feeds", { description: "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reads the subscription list back afterwards and retries anything that did not land, so the counts reflect what is actually on the server; sets isError when fewer changes were confirmed than requested.", inputSchema: z.object({
+              assignments: z
+                .record(
+                  z.string(),
+                  z.array(z.string())
+                )
+                .describe("Map of folder name to array of stream IDs to assign"),
+            }) }, async (params) => {
+              const report = await applyFolderIntents(toIntents(params.assignments));
+              return renderFolderWriteResult(report);
+            });
 
-  server.tool(
-    "reassign_feeds",
-    "Move feeds from one folder to another in bulk. Pass from_folder and a map of {new_folder: [stream_id, ...]}. Costs 1 Zone 2 request per feed (add and remove travel in one call), plus 2 Zone 1 requests to verify the result regardless of batch size. A feed counts as moved only when the subscription list shows it in the destination AND no longer in the source; anything short of that is retried with the add and remove split into separate calls, and reported as unverified with isError set if it still does not land.",
-    {
-      from_folder: z
-        .string()
-        .describe("Folder name to remove all feeds from"),
-      assignments: z
-        .record(z.string(), z.array(z.string()))
-        .describe("Map of new folder name to array of stream IDs to move there"),
-    },
-    async (params) => {
-      const report = await applyFolderIntents(toIntents(params.assignments), {
-        removeFrom: params.from_folder,
-      });
-      return renderFolderWriteResult(report, { from_folder: params.from_folder });
-    }
-  );
+  server.registerTool("reassign_feeds", { description: "Move feeds from one folder to another in bulk. Pass from_folder and a map of {new_folder: [stream_id, ...]}. Costs 1 Zone 2 request per feed (add and remove travel in one call), plus 2 Zone 1 requests to verify the result regardless of batch size. A feed counts as moved only when the subscription list shows it in the destination AND no longer in the source; anything short of that is retried with the add and remove split into separate calls, and reported as unverified with isError set if it still does not land.", inputSchema: z.object({
+              from_folder: z
+                .string()
+                .describe("Folder name to remove all feeds from"),
+              assignments: z
+                .record(z.string(), z.array(z.string()))
+                .describe("Map of new folder name to array of stream IDs to move there"),
+            }) }, async (params) => {
+              const report = await applyFolderIntents(toIntents(params.assignments), {
+                removeFrom: params.from_folder,
+              });
+              return renderFolderWriteResult(report, { from_folder: params.from_folder });
+            });
 
-  server.tool(
-    "rename_folder",
-    "Rename a folder/label. All feeds in the old folder are moved to the new name. Costs 1 Zone 2 request.",
-    {
-      old_name: z.string().describe("Current folder name"),
-      new_name: z.string().describe("New folder name"),
-    },
-    async (params) => {
-      await apiPost<string>("/reader/api/0/rename-tag", {
-        s: `user/-/label/${params.old_name}`,
-        dest: `user/-/label/${params.new_name}`,
-      });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Renamed folder "${params.old_name}" to "${params.new_name}"`,
-          },
-        ],
-      };
-    }
-  );
+  server.registerTool("rename_folder", { description: "Rename a folder/label. All feeds in the old folder are moved to the new name. Costs 1 Zone 2 request.", inputSchema: z.object({
+              old_name: z.string().describe("Current folder name"),
+              new_name: z.string().describe("New folder name"),
+            }) }, async (params) => {
+              await apiPost<string>("/reader/api/0/rename-tag", {
+                s: `user/-/label/${params.old_name}`,
+                dest: `user/-/label/${params.new_name}`,
+              });
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Renamed folder "${params.old_name}" to "${params.new_name}"`,
+                  },
+                ],
+              };
+            });
 
-  server.tool(
-    "manage_subscription",
-    "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request, plus 1 Zone 1 request on edit to read the result back. An edit returns the feed's resulting title and folders with an `applied` flag, so you can see whether the change landed -- if `applied` is true the work is done, do not repeat the call.",
-    {
-      action: z
-        .enum(["subscribe", "edit", "unsubscribe"])
-        .describe("Action to perform"),
-      feed_url: z
-        .string()
-        .optional()
-        .describe("Feed URL (required for subscribe)"),
-      stream_id: z
-        .string()
-        .optional()
-        .describe("Stream ID of existing feed (required for edit/unsubscribe)"),
-      title: z.string().optional().describe("New title for the feed"),
-      add_to_folder: z
-        .string()
-        .optional()
-        .describe("Folder name to add the feed to"),
-      remove_from_folder: z
-        .string()
-        .optional()
-        .describe("Folder name to remove the feed from"),
-    },
-    async (params) => {
-      if (params.action === "subscribe") {
-        if (!params.feed_url) {
-          return {
-            content: [
-              { type: "text" as const, text: "Error: feed_url is required for subscribe action" },
-            ],
-            isError: true,
-          };
-        }
+  server.registerTool("manage_subscription", { description: "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request, plus 1 Zone 1 request on edit to read the result back. An edit returns the feed's resulting title and folders with an `applied` flag, so you can see whether the change landed -- if `applied` is true the work is done, do not repeat the call.", inputSchema: z.object({
+              action: z
+                .enum(["subscribe", "edit", "unsubscribe"])
+                .describe("Action to perform"),
+              feed_url: z
+                .string()
+                .optional()
+                .describe("Feed URL (required for subscribe)"),
+              stream_id: z
+                .string()
+                .optional()
+                .describe("Stream ID of existing feed (required for edit/unsubscribe)"),
+              title: z.string().optional().describe("New title for the feed"),
+              add_to_folder: z
+                .string()
+                .optional()
+                .describe("Folder name to add the feed to"),
+              remove_from_folder: z
+                .string()
+                .optional()
+                .describe("Folder name to remove the feed from"),
+            }) }, async (params) => {
+              if (params.action === "subscribe") {
+                if (!params.feed_url) {
+                  return {
+                    content: [
+                      { type: "text" as const, text: "Error: feed_url is required for subscribe action" },
+                    ],
+                    isError: true,
+                  };
+                }
 
-        const result = await apiPost<string>(
-          "/reader/api/0/subscription/quickadd",
-          { quickadd: params.feed_url }
-        );
+                const result = await apiPost<string>(
+                  "/reader/api/0/subscription/quickadd",
+                  { quickadd: params.feed_url }
+                );
 
-        // After subscribing, optionally set title and folder
-        if (params.title || params.add_to_folder) {
-          const streamId = `feed/${params.feed_url}`;
-          const editBody: Record<string, string> = {
-            ac: "edit",
-            s: streamId,
-          };
-          if (params.title) editBody.t = params.title;
-          if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
-          await apiPost<string>("/reader/api/0/subscription/edit", editBody);
-        }
+                // After subscribing, optionally set title and folder
+                if (params.title || params.add_to_folder) {
+                  const streamId = `feed/${params.feed_url}`;
+                  const editBody: Record<string, string> = {
+                    ac: "edit",
+                    s: streamId,
+                  };
+                  if (params.title) editBody.t = params.title;
+                  if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
+                  await apiPost<string>("/reader/api/0/subscription/edit", editBody);
+                }
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Subscribed to ${params.feed_url}${params.title ? ` as "${params.title}"` : ""}${params.add_to_folder ? ` in folder "${params.add_to_folder}"` : ""}`,
-            },
-          ],
-        };
-      }
+                return {
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: `Subscribed to ${params.feed_url}${params.title ? ` as "${params.title}"` : ""}${params.add_to_folder ? ` in folder "${params.add_to_folder}"` : ""}`,
+                    },
+                  ],
+                };
+              }
 
-      if (!params.stream_id) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Error: stream_id is required for edit/unsubscribe actions",
-            },
-          ],
-          isError: true,
-        };
-      }
+              if (!params.stream_id) {
+                return {
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: "Error: stream_id is required for edit/unsubscribe actions",
+                    },
+                  ],
+                  isError: true,
+                };
+              }
 
-      if (params.action === "unsubscribe") {
-        await apiPost<string>("/reader/api/0/subscription/edit", {
-          ac: "unsubscribe",
-          s: params.stream_id,
-        });
-        return {
-          content: [
-            { type: "text" as const, text: `Unsubscribed from ${params.stream_id}` },
-          ],
-        };
-      }
+              if (params.action === "unsubscribe") {
+                await apiPost<string>("/reader/api/0/subscription/edit", {
+                  ac: "unsubscribe",
+                  s: params.stream_id,
+                });
+                return {
+                  content: [
+                    { type: "text" as const, text: `Unsubscribed from ${params.stream_id}` },
+                  ],
+                };
+              }
 
-      // edit
-      const editBody: Record<string, string> = {
-        ac: "edit",
-        s: params.stream_id,
-      };
-      if (params.title) editBody.t = params.title;
-      if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
-      if (params.remove_from_folder) editBody.r = `user/-/label/${params.remove_from_folder}`;
+              // edit
+              const editBody: Record<string, string> = {
+                ac: "edit",
+                s: params.stream_id,
+              };
+              if (params.title) editBody.t = params.title;
+              if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
+              if (params.remove_from_folder) editBody.r = `user/-/label/${params.remove_from_folder}`;
 
-      await apiPost<string>("/reader/api/0/subscription/edit", editBody, undefined, {
-        expectOk: true,
-      });
+              await apiPost<string>("/reader/api/0/subscription/edit", editBody, undefined, {
+                expectOk: true,
+              });
 
-      // Report the resulting state, not "a request was sent".
-      //
-      // This used to return a fixed `Updated subscription <id>` string. An agent
-      // that asked for a title change plus a folder had no way to see whether
-      // either landed, so on 2026-09-08 one called this nine times in a row on the
-      // same feed and burned its entire iteration budget without ever noticing the
-      // edit had already worked. One Zone 1 read ends that loop.
-      let actual: { title: string; folders: string[] } | null = null;
-      let verifyError: string | undefined;
-      try {
-        invalidateCache();
-        const data = await apiGet<SubscriptionListResponse>(
-          "/reader/api/0/subscription/list",
-          { output: "json" }
-        );
-        const sub = data.subscriptions.find((s) => s.id === params.stream_id);
-        if (sub) actual = { title: sub.title, folders: sub.categories.map((c) => c.label) };
-      } catch (e) {
-        verifyError = e instanceof Error ? e.message : String(e);
-      }
+              // Report the resulting state, not "a request was sent".
+              //
+              // This used to return a fixed `Updated subscription <id>` string. An agent
+              // that asked for a title change plus a folder had no way to see whether
+              // either landed, so on 2026-09-08 one called this nine times in a row on the
+              // same feed and burned its entire iteration budget without ever noticing the
+              // edit had already worked. One Zone 1 read ends that loop.
+              let actual: { title: string; folders: string[] } | null = null;
+              let verifyError: string | undefined;
+              try {
+                invalidateCache();
+                const data = await apiGet<SubscriptionListResponse>(
+                  "/reader/api/0/subscription/list",
+                  { output: "json" }
+                );
+                const sub = data.subscriptions.find((s) => s.id === params.stream_id);
+                if (sub) actual = { title: sub.title, folders: sub.categories.map((c) => c.label) };
+              } catch (e) {
+                verifyError = e instanceof Error ? e.message : String(e);
+              }
 
-      const wanted = {
-        ...(params.title ? { title: params.title } : {}),
-        ...(params.add_to_folder ? { in_folder: params.add_to_folder } : {}),
-        ...(params.remove_from_folder ? { not_in_folder: params.remove_from_folder } : {}),
-      };
+              const wanted = {
+                ...(params.title ? { title: params.title } : {}),
+                ...(params.add_to_folder ? { in_folder: params.add_to_folder } : {}),
+                ...(params.remove_from_folder ? { not_in_folder: params.remove_from_folder } : {}),
+              };
 
-      const norm = (s: string) => s.trim().toLowerCase();
-      const applied =
-        actual !== null &&
-        (!params.title || norm(actual.title) === norm(params.title)) &&
-        (!params.add_to_folder ||
-          actual.folders.some((f) => norm(f) === norm(params.add_to_folder!))) &&
-        (!params.remove_from_folder ||
-          !actual.folders.some((f) => norm(f) === norm(params.remove_from_folder!)));
+              const norm = (s: string) => s.trim().toLowerCase();
+              const applied =
+                actual !== null &&
+                (!params.title || norm(actual.title) === norm(params.title)) &&
+                (!params.add_to_folder ||
+                  actual.folders.some((f) => norm(f) === norm(params.add_to_folder!))) &&
+                (!params.remove_from_folder ||
+                  !actual.folders.some((f) => norm(f) === norm(params.remove_from_folder!)));
 
-      return {
-        isError: actual !== null && !applied,
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                stream_id: params.stream_id,
-                requested: wanted,
-                applied,
-                current: actual ?? "unknown",
-                ...(verifyError
-                  ? {
-                      warning:
-                        `The edit was accepted but could not be verified (${verifyError}). ` +
-                        `Re-check with list_subscriptions before retrying -- it may already have applied.`,
-                    }
-                  : {}),
-                ...(actual !== null && !applied
-                  ? {
-                      note:
-                        "The server does not show the requested change. Do not simply repeat " +
-                        "this call; the same request has already been accepted once.",
-                    }
-                  : {}),
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    }
-  );
+              return {
+                isError: actual !== null && !applied,
+                content: [
+                  {
+                    type: "text" as const,
+                    text: JSON.stringify(
+                      {
+                        stream_id: params.stream_id,
+                        requested: wanted,
+                        applied,
+                        current: actual ?? "unknown",
+                        ...(verifyError
+                          ? {
+                              warning:
+                                `The edit was accepted but could not be verified (${verifyError}). ` +
+                                `Re-check with list_subscriptions before retrying -- it may already have applied.`,
+                            }
+                          : {}),
+                        ...(actual !== null && !applied
+                          ? {
+                              note:
+                                "The server does not show the requested change. Do not simply repeat " +
+                                "this call; the same request has already been accepted once.",
+                            }
+                          : {}),
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            });
 }

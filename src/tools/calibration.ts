@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { apiGet, invalidateCache } from "../api.js";
+import { apiGet } from "../api.js";
 import type {
   ArticleItem,
   StreamContentsResponse,
@@ -356,7 +356,6 @@ async function paginateStream(
 // ---------------------------------------------------------------------------
 
 async function extractClassifierData(args: ExtractArgs): Promise<ExtractResult> {
-  if (args.refresh) invalidateCache();
 
   const verified: VerifiedRow[] = [];
   const verifiedIds = new Set<string>();
@@ -675,7 +674,7 @@ function thresholdDiagnostic(
 // ---------------------------------------------------------------------------
 
 export function registerCalibrationTools(server: McpServer): void {
-  server.registerTool("extract_classifier_data", { description: "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations. Caches per Inoreader URL; pass refresh=true to force re-fetch. Costs ~4-8 Zone 1 requests for the verified set (4 tag streams paginated up to 20 pages each, but typically 1-2 pages each), plus up to population_pages Zone 1 if include_population is true.", inputSchema: z.object({
+  server.registerTool("extract_classifier_data", { description: "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations.. Costs ~4-8 Zone 1 requests for the verified set (4 tag streams paginated up to 20 pages each, but typically 1-2 pages each), plus up to population_pages Zone 1 if include_population is true.", inputSchema: z.object({
               prompt_name: z
                 .string()
                 .optional()
@@ -709,7 +708,7 @@ export function registerCalibrationTools(server: McpServer): void {
               refresh: z
                 .boolean()
                 .optional()
-                .describe("Clear the cache before fetching (default false)."),
+                .describe("No-op, retained for compatibility. Reads are not cached between calls."),
             }) }, async (params) => {
               const result = await extractClassifierData(params);
               return {

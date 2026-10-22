@@ -71,7 +71,7 @@ function registerSetupAuth(server: McpServer): void {
 /**
  * Builds a fully registered server. The HTTP transport calls this once per request,
  * stdio once per process, so keep it free of side effects and I/O. Tokens, the rate
- * limiter and caches live at module scope.
+ * limiter live at module scope; API responses are never cached.
  */
 export function createServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: VERSION });

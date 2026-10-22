@@ -1,10 +1,14 @@
 import { ensureValidToken } from "./auth.js";
-import { getCached, setCached, invalidate } from "./cache.js";
 import { noteRequest, updateFromHeaders } from "./rate-limit.js";
 
 const BASE_URL = "https://www.inoreader.com";
 
-export { invalidate as invalidateCache };
+// Every read goes to Inoreader. There is deliberately no response cache: the user
+// edits subscriptions in Inoreader's own apps, which this process never hears about,
+// so no invalidation scheme can keep a cached read correct. The old module-level
+// cache had no expiry and was only harmless while mcpjungle spawned a fresh process
+// per tool call; once the server ran as one long-lived HTTP process, it served an
+// eight-day-old subscription list and the organize workflow never saw new feeds.
 
 // Zone is a property of the endpoint, not of the HTTP verb. Most POSTs are Zone 2
 // writes, but stream/items/contents is a POST purely because the id list is too
@@ -101,14 +105,10 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
     }
   }
 
-  const cacheKey = url.toString();
-  const cached = getCached<T>(cacheKey);
-  if (cached !== null) return cached;
-
   const token = await ensureValidToken();
   noteRequest(1);
   const res = await fetchWithRetry(
-    cacheKey,
+    url.toString(),
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -125,9 +125,7 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
     throw new Error(`Inoreader API error ${res.status} on GET ${path}: ${text}`);
   }
 
-  const data = await res.json() as T;
-  setCached(cacheKey, data);
-  return data;
+  return await res.json() as T;
 }
 
 export async function apiPost<T>(
@@ -172,9 +170,6 @@ export async function apiPost<T>(
     const text = await res.text();
     throw new Error(`Inoreader API error ${res.status} on POST ${path}: ${text}`);
   }
-
-  // Writes may change server state, so invalidate all cached reads
-  invalidate();
 
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {

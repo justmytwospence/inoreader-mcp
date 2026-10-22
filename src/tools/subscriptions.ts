@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { apiGet, apiPost, invalidateCache } from "../api.js";
+import { apiGet, apiPost } from "../api.js";
 import { renderFolderWriteResult } from "../results.js";
 import { applyFolderIntents, type FolderIntent } from "../verify.js";
 import type { SubscriptionListResponse } from "../types.js";
@@ -431,7 +431,6 @@ export function registerSubscriptionTools(server: McpServer): void {
               let actual: { title: string; folders: string[] } | null = null;
               let verifyError: string | undefined;
               try {
-                invalidateCache();
                 const data = await apiGet<SubscriptionListResponse>(
                   "/reader/api/0/subscription/list",
                   { output: "json" }

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { apiGet, invalidateCache } from "../api.js";
+import { apiGet } from "../api.js";
 import { snapshot, zoneRemaining } from "../rate-limit.js";
 import type {
   SubscriptionListResponse,
@@ -56,7 +56,6 @@ export function registerAnalyticsTools(server: McpServer): void {
                 .optional()
                 .describe("No-op, retained for compatibility. Reads are not cached between calls."),
             }) }, async (params) => {
-              if (params.refresh) invalidateCache();
 
               const monthsBack = params.months ?? 12;
               const globalSinceSec = Math.floor(

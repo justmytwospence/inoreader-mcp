@@ -7,6 +7,7 @@ import { registerSubscriptionTools } from "./tools/subscriptions.js";
 import { registerOrganizationTools } from "./tools/organization.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerCalibrationTools } from "./tools/calibration.js";
+import { registerRepairTools } from "./tools/repair.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
 
@@ -81,6 +82,7 @@ export function createServer(): McpServer {
   registerOrganizationTools(server);
   registerAnalyticsTools(server);
   registerCalibrationTools(server);
+  registerRepairTools(server);
   registerResources(server);
   registerPrompts(server);
   return server;

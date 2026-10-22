@@ -147,6 +147,8 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 | `suggest_feed_cleanup` | Deterministic cleaned-up title proposals for uncategorized feeds — strips vendor boilerplate (`Blog on X`, `X's Blog`, trailing `RSS`/`Feed`, redundant site suffix). Read-only; apply with `manage_subscription`. | 1 Z1 |
 | `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map. Verified. | 1 Z2/feed + 2 Z1 |
 | `reassign_feeds` | Move feeds between folders in bulk. Verified — a feed counts as moved only when it is in the destination *and* out of the source. | 1 Z2/feed + 2 Z1 |
+| `find_feed_replacement` | For a broken feed: where the old address redirects, the feeds its site advertises, and conventional paths, each compared with the posts Inoreader stored from the old feed. `high` = shares posts or is the redirect target, `medium` = same site only. Read-only; refuses private network addresses. | 2 Z1 + site fetches |
+| `replace_feed` | Swap a subscription to a new feed URL keeping its title and folders; the old one is removed only after the new one is confirmed. | 2-3 Z2 + 3 Z1 |
 | `analyze_feeds` | Bayesian feed health analysis with category-level priors. Degrades and reports rather than exhausting the read budget. | 3 + pages [+ 1 Z1/feed for volume] |
 
 #### Saved items

@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet } from "../api.js";
+import { jsonResult } from "../contracts.js";
+import { assertBudget } from "../rate-limit.js";
 import type {
   ArticleItem,
   StreamContentsResponse,
@@ -309,6 +311,8 @@ interface ExtractResult {
     population_pages_used: number;
     population_hit_cap: boolean;
     api_cost_z1: number;
+    cost_basis: string;
+    verified_hit_cap: boolean;
     window_months: number | null;
   };
 }
@@ -334,21 +338,23 @@ async function paginateStream(
     };
     if (options.since) queryParams.ot = options.since;
     if (continuation) queryParams.c = continuation;
+    assertBudget(1, 1, "classifier page", 25);
     let data: StreamContentsResponse;
     try {
       data = await apiGet<StreamContentsResponse>(
         `/reader/api/0/stream/contents/${encodeURIComponent(streamId)}`,
-        queryParams,
+        queryParams, { reserve: 25 },
       );
-    } catch {
-      break;
+    } catch (e) {
+      // Missing labels and HTTP failures are not an empty, complete dataset.
+      throw new Error(`Classifier stream ${streamId} could not be read: ${String(e)}`);
     }
     pages++;
     items.push(...data.items);
-    if (!data.continuation) break;
     continuation = data.continuation;
+    if (!continuation) break;
   }
-  return { items, pagesUsed: pages, hitCap: pages >= options.maxPages };
+  return { items, pagesUsed: pages, hitCap: !!continuation && pages >= options.maxPages };
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +362,8 @@ async function paginateStream(
 // ---------------------------------------------------------------------------
 
 async function extractClassifierData(args: ExtractArgs): Promise<ExtractResult> {
-
+  assertBudget(1, 4 * VERIFIED_TAG_PAGE_CAP + (args.include_population ? args.population_pages ?? 30 : 0), "classifier maximum page budget", 25);
+  let verifiedHitCap = false;
   const verified: VerifiedRow[] = [];
   const verifiedIds = new Set<string>();
   let z1Cost = 0;
@@ -368,10 +375,11 @@ async function extractClassifierData(args: ExtractArgs): Promise<ExtractResult> 
   let auditCount = 0;
 
   for (const tag of VERIFIED_TAGS) {
-    const { items, pagesUsed } = await paginateStream(tag.id, {
+    const { items, pagesUsed, hitCap } = await paginateStream(tag.id, {
       maxPages: VERIFIED_TAG_PAGE_CAP,
     });
     z1Cost += pagesUsed;
+    verifiedHitCap ||= hitCap;
     for (const item of items) {
       if (verifiedIds.has(item.id)) continue;
       verifiedIds.add(item.id);
@@ -468,6 +476,8 @@ async function extractClassifierData(args: ExtractArgs): Promise<ExtractResult> 
       population_pages_used: popPagesUsed,
       population_hit_cap: popHitCap,
       api_cost_z1: z1Cost,
+      cost_basis: "Successful base page requests; safe-read retries are extra and counted in rate-limit status. Existing Intelligence summaries only; no classifier/paid processing is started.",
+      verified_hit_cap: verifiedHitCap,
       window_months: windowMonths,
     },
   };
@@ -674,7 +684,7 @@ function thresholdDiagnostic(
 // ---------------------------------------------------------------------------
 
 export function registerCalibrationTools(server: McpServer): void {
-  server.registerTool("extract_classifier_data", { annotations: { readOnlyHint: true }, description: "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations.. Costs ~4-8 Zone 1 requests for the verified set (4 tag streams paginated up to 20 pages each, but typically 1-2 pages each), plus up to population_pages Zone 1 if include_population is true.", inputSchema: z.object({
+  server.registerTool("extract_classifier_data", { title: "Extract classifier data", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Pull Inoreader Intelligence summaries for the four verification-tagged streams (read/worth-it, read/not-worth-it, audit/worth-it, audit/not-worth-it) and parse a binary RECOMMENDATION + CONFIDENCE classifier output from each. Optionally also scans a folder/window for the score distribution among unverified articles. The verified set is the labeled dataset for calibration analysis. The population scan is the candidate pool for audit recommendations. Costs 4-80 base Zone 1 requests for the verified set (4 streams, up to 20 pages each), plus up to population_pages if include_population=true; retries are extra. Preflights the maximum page budget plus a 25-request reserve against known quota. Missing streams fail rather than masquerading as complete data; cap flags disclose partial coverage. Reads existing summaries only: never starts paid Intelligence processing. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               prompt_name: z
                 .string()
                 .optional()
@@ -700,7 +710,7 @@ export function registerCalibrationTools(server: McpServer): void {
                 .optional()
                 .describe("Window in months for the population scan (default 3)."),
               population_pages: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(200)
                 .optional()
@@ -711,18 +721,11 @@ export function registerCalibrationTools(server: McpServer): void {
                 .describe("No-op, retained for compatibility. Reads are not cached between calls."),
             }) }, async (params) => {
               const result = await extractClassifierData(params);
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(result, null, 2),
-                  },
-                ],
-              };
+              return jsonResult(result);
             });
 
-  server.registerTool("analyze_classifier_calibration", { annotations: { readOnlyHint: true }, description: "Build a reliability diagram for the LLM classifier on the verified-recommended slice. Bins articles by CONFIDENCE score, computes per-bin Beta-Binomial posteriors with an empirical-Bayes prior from the marginal worth-it rate, and reports posterior mean + 95% credible interval per bin. Pool-adjacent-violators (isotonic regression, weighted by bin n) gives a monotone-smoothed curve for visualization; per-bin intervals are the source of truth for inference. Reports ECE, monotonicity violations, a threshold diagnostic (lowest-score recommend-read bin gives an upper bound on what's just below threshold by monotonicity), Manski-style FNR bounds (always identifiable), and an audit-conditional recall posterior via Monte Carlo when audit data exists. Optional per-feed and per-folder slices for multicalibration-lite. Calls extract_classifier_data internally; cost is the same as that call.", inputSchema: z.object({
-              prompt_name: z.string().optional().describe("Forwarded to extract_classifier_data."),
+  server.registerTool("analyze_classifier_calibration", { title: "Analyze classifier calibration", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Build a reliability diagram for the LLM classifier on the verified-recommended slice. Bins articles by CONFIDENCE score, computes per-bin Beta-Binomial posteriors with an empirical-Bayes prior from the marginal worth-it rate, and reports posterior mean + 95% credible interval per bin. Pool-adjacent-violators (isotonic regression, weighted by bin n) gives a monotone-smoothed curve for visualization; per-bin intervals are the source of truth for inference. Reports ECE, monotonicity violations, a threshold diagnostic (lowest-score recommend-read bin gives an upper bound on what's just below threshold by monotonicity), Manski-style FNR bounds (always identifiable), and an audit-conditional recall posterior via Monte Carlo when audit data exists. Optional per-feed and per-folder slices for multicalibration-lite. Calls extract_classifier_data internally; cost is the same as that call. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
+              prompt_name: z.string().min(1).max(8192).optional().describe("Forwarded to extract_classifier_data."),
               include_population: z
                 .boolean()
                 .optional()
@@ -738,14 +741,14 @@ export function registerCalibrationTools(server: McpServer): void {
                 .optional()
                 .describe("Forwarded to extract_classifier_data."),
               population_pages: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(200)
                 .optional()
                 .describe("Forwarded to extract_classifier_data."),
               refresh: z.boolean().optional().describe("Forwarded to extract_classifier_data."),
               bins: z
-                .number()
+                .number().int()
                 .min(2)
                 .max(50)
                 .optional()
@@ -765,7 +768,7 @@ export function registerCalibrationTools(server: McpServer): void {
                   "Additional slices to compute calibration on. Each slice with total n < min_bin_n is reported but flagged.",
                 ),
               min_bin_n: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(100)
                 .optional()
@@ -920,12 +923,7 @@ export function registerCalibrationTools(server: McpServer): void {
                 }
               }
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         calibration: {
                           bins: overall.bins,
                           monotonicity_violations: overall.monotonicity_violations,
@@ -941,18 +939,12 @@ export function registerCalibrationTools(server: McpServer): void {
                         ...(breakdowns.by_folder ? { by_folder: breakdowns.by_folder } : {}),
                         data_summary: data.summary,
                         api_cost_z1: data.summary.api_cost_z1,
-                      },
-                      null,
-                      2,
-                    ),
-                  },
-                ],
-              };
+                      });
             });
 
-  server.registerTool("recommend_audit_articles", { annotations: { readOnlyHint: true }, description: "Suggest a small batch of recommend-skip articles to read as audits. Scores candidates by bin uncertainty (CI width on the calibration curve), proximity to the decision threshold, and (optionally) sparse audit coverage. Calls extract_classifier_data with include_population=true to find skip-recommended candidates and analyze_classifier_calibration to source per-bin uncertainty. Same Z1 cost as those calls. Already-audited articles are excluded.", inputSchema: z.object({
+  server.registerTool("recommend_audit_articles", { title: "Recommend audit articles", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Suggest a small batch of recommend-skip articles to read as audits. Scores candidates by bin uncertainty (CI width on the calibration curve), proximity to the decision threshold, and (optionally) sparse audit coverage. Extracts existing summaries once with include_population=true, then computes uncertainty locally (no second API scan). Base cost 4-80 Zone 1 verification pages plus up to population_pages (default 30, max 200); preflights the maximum plus a 25-request reserve. Never starts paid Intelligence processing. Already-audited articles are excluded. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               count: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(50)
                 .optional()
@@ -984,13 +976,13 @@ export function registerCalibrationTools(server: McpServer): void {
                 .optional()
                 .describe("Window in months (default 3)."),
               population_pages: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(200)
                 .optional()
                 .describe("Page cap (default 30)."),
               bins: z
-                .number()
+                .number().int()
                 .min(2)
                 .max(50)
                 .optional()
@@ -1054,12 +1046,7 @@ export function registerCalibrationTools(server: McpServer): void {
                 .sort((a, b) => b.acquisition - a.acquisition)
                 .slice(0, count);
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         candidates: candidates.map((c) => ({
                           id: c.row.id,
                           title: c.row.title,
@@ -1080,12 +1067,6 @@ export function registerCalibrationTools(server: McpServer): void {
                           feed: params.feed ?? null,
                         },
                         api_cost_z1: data.summary.api_cost_z1,
-                      },
-                      null,
-                      2,
-                    ),
-                  },
-                ],
-              };
+                      });
             });
 }

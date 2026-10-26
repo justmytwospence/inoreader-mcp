@@ -18,7 +18,7 @@ const CONFIG_DIR = process.env.INOREADER_CONFIG_DIR ?? join(homedir(), ".config"
 const STATE_PATH = join(CONFIG_DIR, "rate-limit.json");
 
 function emptyZone(): ZoneState {
-  return { limit: null, usage: null, resetAfterSec: null, lastUpdated: 0 };
+  return { limit: null, usage: null, resetAfterSec: null, lastUpdated: 0, attemptCount: 0, usageAttemptCount: 0 };
 }
 
 function emptyState(): RateLimitState {
@@ -36,14 +36,34 @@ function todayKey(): string {
 
 let cached: RateLimitState | null = null;
 
+/** Legacy/corrupt telemetry must not create fake headroom or break status reads. */
+function normalizeZone(raw: ZoneState): ZoneState {
+  const zone = emptyZone();
+  const fields = ["limit", "usage", "resetAfterSec", "lastUpdated", "limitObservedAt", "usageObservedAt", "usageExpiresAt", "resetObservedAt", "attemptCount", "usageAttemptCount", "cooldownUntil", "conservativeUsage"] as const;
+  for (const field of fields) {
+    const value = raw[field];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value < 8_640_000_000_000_000) {
+      if (field === "resetAfterSec" && value > (8_639_999_999_999_999 - Date.now()) / 1000) continue;
+      zone[field] = value;
+    }
+  }
+  // Old files only had lastUpdated, which could have been stamped by unrelated
+  // headers. Retain the observation for display but do not trust it for admission.
+  return zone;
+}
+
 function load(): RateLimitState {
   if (cached) return cached;
   try {
     const parsed = JSON.parse(readFileSync(STATE_PATH, "utf-8")) as RateLimitState;
-    if (parsed?.zone1 && parsed?.zone2) {
-      parsed.local ??= { dayKey: todayKey(), zone1Count: 0, zone2Count: 0 };
-      parsed.unknownHeaders ??= {};
-      // A new day resets the locally counted floor. The header-derived numbers are
+    if (parsed?.zone1 && typeof parsed.zone1 === "object" && parsed?.zone2 && typeof parsed.zone2 === "object") {
+      parsed.zone1 = normalizeZone(parsed.zone1);
+      parsed.zone2 = normalizeZone(parsed.zone2);
+      if (!parsed.local || !Number.isSafeInteger(parsed.local.zone1Count) || parsed.local.zone1Count < 0 || !Number.isSafeInteger(parsed.local.zone2Count) || parsed.local.zone2Count < 0) {
+        parsed.local = { dayKey: todayKey(), zone1Count: 0, zone2Count: 0 };
+      }
+      parsed.unknownHeaders = Object.fromEntries(Object.entries(parsed.unknownHeaders ?? {}).filter(([, v]) => typeof v === "string"));
+      // A new day resets the local attempt display. The header-derived numbers are
       // left alone; Inoreader will correct them on the next response.
       if (parsed.local.dayKey !== todayKey()) {
         parsed.local = { dayKey: todayKey(), zone1Count: 0, zone2Count: 0 };
@@ -124,8 +144,9 @@ export function parseRateHeaders(headers: Headers): ParsedRateHeaders {
 
   const num = (raw: string | null): number | null => {
     if (raw === null) return null;
-    const n = Number.parseInt(raw, 10);
-    return Number.isFinite(n) ? n : null;
+    if (!/^\d+$/.test(raw)) return null;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n >= 0 ? n : null;
   };
 
   const out: ParsedRateHeaders = {
@@ -142,6 +163,7 @@ export function parseRateHeaders(headers: Headers): ParsedRateHeaders {
     saw: false,
   };
 
+  if (out.resetAfterSec !== null && out.resetAfterSec > (8_639_999_999_999_999 - Date.now()) / 1000) out.resetAfterSec = null;
   out.saw =
     out.zone1.limit !== null ||
     out.zone1.usage !== null ||
@@ -152,111 +174,173 @@ export function parseRateHeaders(headers: Headers): ParsedRateHeaders {
   for (const [name, value] of headers.entries()) {
     const lower = name.toLowerCase();
     if (!lower.startsWith("x-reader-")) continue;
-    if (lower.includes("zone1") || lower.includes("zone2")) continue;
-    if (lower === "x-reader-limits-reset-after") continue;
+    if (/^x-reader-(zone[12]-(limit|usage)|limits-zone[12]|usage-zone[12]|limits-reset-after|zone1-reset-after)$/.test(lower)) continue;
     out.unknown[lower] = value;
   }
 
   return out;
 }
 
-export function updateFromHeaders(headers: Headers): void {
+export type AttemptCounts = { zone1: number; zone2: number };
+
+export function updateFromHeaders(headers: Headers, atDispatch?: AttemptCounts): void {
   const parsed = parseRateHeaders(headers);
   const state = load();
 
-  const apply = (zone: ZoneState, limit: number | null, usage: number | null) => {
-    if (limit !== null) zone.limit = limit;
-    if (usage !== null) zone.usage = usage;
-  };
-
-  apply(state.zone1, parsed.zone1.limit, parsed.zone1.usage);
-  apply(state.zone2, parsed.zone2.limit, parsed.zone2.usage);
-
-  if (parsed.resetAfterSec !== null) {
-    state.zone1.resetAfterSec = parsed.resetAfterSec;
-    state.zone2.resetAfterSec = parsed.resetAfterSec;
-  }
-
-  Object.assign(state.unknownHeaders, parsed.unknown);
-
-  // Only claim freshness when a header actually arrived. The old code stamped
-  // lastUpdated unconditionally, so the numbers looked current even when nothing
-  // had refreshed them.
-  if (!parsed.saw) return;
   const now = Date.now();
-  state.zone1.lastUpdated = now;
-  state.zone2.lastUpdated = now;
-  persist(state);
+  const apply = (zone: ZoneState, values: ParsedRateHeaders["zone1"], dispatched: number | undefined) => {
+    if (values.limit !== null) {
+      zone.limit = values.limit;
+      zone.limitObservedAt = now;
+    }
+    if (values.usage !== null) {
+      // Concurrent responses can arrive out of order. Never lower usage inside
+      // the observed window; after reset a lower count is legitimate.
+      const expired = observationExpired(zone, now);
+      const prior = expired ? 0 : zone.conservativeUsage ?? zone.usage ?? 0;
+      zone.usage = values.usage; // actual latest received header, never label an estimate authoritative
+      zone.conservativeUsage = Math.max(prior, values.usage);
+      zone.usageObservedAt = now;
+      zone.usageExpiresAt = parsed.resetAfterSec !== null
+        ? now + parsed.resetAfterSec * 1000
+        : zone.resetObservedAt !== undefined && zone.resetAfterSec !== null && zone.resetObservedAt + zone.resetAfterSec * 1000 > now
+          ? zone.resetObservedAt + zone.resetAfterSec * 1000 : now + 24 * 60 * 60 * 1000;
+      zone.usageAttemptCount = dispatched ?? zone.attemptCount ?? 0;
+    }
+    if (values.limit !== null || values.usage !== null) zone.lastUpdated = now;
+    if (parsed.resetAfterSec !== null) {
+      zone.resetAfterSec = parsed.resetAfterSec;
+      zone.resetObservedAt = now;
+    }
+  };
+  apply(state.zone1, parsed.zone1, atDispatch?.zone1);
+  apply(state.zone2, parsed.zone2, atDispatch?.zone2);
+  Object.assign(state.unknownHeaders, parsed.unknown);
+  if (parsed.saw || Object.keys(parsed.unknown).length) persist(state);
 }
 
 /**
  * Count a request we are about to make.
  *
- * This is a floor estimate, deliberately independent of the response headers: it
+ * This is an attempt count, deliberately independent of response headers: it
  * keeps working if Inoreader renames a header again, and it is the only budget
  * signal available before the first response of the day comes back.
  */
-export function noteRequest(zone: 1 | 2): void {
+export function noteRequest(zone: 1 | 2): AttemptCounts {
+  assertBudget(zone, 1, "HTTP attempt");
   const state = load();
   if (state.local.dayKey !== todayKey()) {
     state.local = { dayKey: todayKey(), zone1Count: 0, zone2Count: 0 };
   }
   if (zone === 1) state.local.zone1Count++;
   else state.local.zone2Count++;
+  const z = zone === 1 ? state.zone1 : state.zone2;
+  z.attemptCount = (z.attemptCount ?? 0) + 1;
   persist(state);
+  return { zone1: state.zone1.attemptCount ?? 0, zone2: state.zone2.attemptCount ?? 0 };
 }
 
 export function getState(): RateLimitState {
-  return structuredClone(load());
+  const state = load();
+  if (state.local.dayKey !== todayKey()) {
+    state.local = { dayKey: todayKey(), zone1Count: 0, zone2Count: 0 };
+  }
+  return structuredClone(state);
+}
+
+function limitExpired(zone: ZoneState, now = Date.now()): boolean {
+  return zone.limitObservedAt === undefined || now - zone.limitObservedAt >= 24 * 60 * 60 * 1000;
+}
+
+function observationExpired(zone: ZoneState, now = Date.now()): boolean {
+  if (!zone.usageObservedAt) return true; // legacy files lack field-level provenance
+  return now >= (zone.usageExpiresAt ?? zone.usageObservedAt + 24 * 60 * 60 * 1000);
+}
+
+export class BudgetError extends Error {}
+
+/** Preflight is conservative, not a quota reservation; every attempt rechecks. */
+export function assertBudget(zone: 1 | 2, requests: number, workflow: string, reserve = 0): void {
+  const z = zone === 1 ? load().zone1 : load().zone2;
+  if ((z.cooldownUntil ?? 0) > Date.now()) {
+    throw new BudgetError(`Zone ${zone} cooldown until ${new Date(z.cooldownUntil!).toISOString()}; ${workflow} not started.`);
+  }
+  const { remaining, source } = zoneRemaining(zone);
+  if (remaining !== null && remaining < requests + reserve) {
+    throw new BudgetError(`Insufficient Zone ${zone} budget for ${workflow}: need ${requests} + ${reserve} reserve, ${remaining} remaining (${source}). No automatic write replay.`);
+  }
+}
+
+export function setCooldown(zone: 1 | 2, delayMs: number): void {
+  const state = load();
+  const z = zone === 1 ? state.zone1 : state.zone2;
+  z.cooldownUntil = Math.max(z.cooldownUntil ?? 0, Math.min(8_639_999_999_999_999, Date.now() + delayMs));
+  persist(state);
 }
 
 /**
  * Best available view of what is left in a zone, and how we know.
  *
- * `source` matters to callers: "headers" is authoritative, "local-count" is a floor
- * derived from requests this client made today (it cannot see usage from other
- * clients), and "unknown" means refuse to guess.
+ * `source` distinguishes the received header from conservative admission estimates
+ * (later attempts and out-of-order responses). Other clients are unseen; expired
+ * observations are unknown. UTC local counts alone cannot establish an upstream
+ * reset window or quota allowance.
  */
 export function zoneRemaining(zone: 1 | 2): {
   remaining: number | null;
-  source: "headers" | "local-count" | "unknown";
+  source: "headers" | "headers+local-estimate" | "unknown";
 } {
   const state = load();
   const z = zone === 1 ? state.zone1 : state.zone2;
-  if (z.limit !== null && z.usage !== null) {
-    return { remaining: Math.max(0, z.limit - z.usage), source: "headers" };
-  }
-  const used = zone === 1 ? state.local.zone1Count : state.local.zone2Count;
-  if (z.limit !== null) {
-    return { remaining: Math.max(0, z.limit - used), source: "local-count" };
+  if (z.limit !== null && z.usage !== null && !limitExpired(z) && !observationExpired(z)) {
+    const since = Math.max(0, (z.attemptCount ?? 0) - (z.usageAttemptCount ?? 0));
+    return {
+      remaining: Math.max(0, z.limit - (z.conservativeUsage ?? z.usage) - since),
+      source: since || (z.conservativeUsage ?? z.usage) !== z.usage ? "headers+local-estimate" : "headers",
+    };
   }
   return { remaining: null, source: "unknown" };
 }
 
 /** Shared renderer for get_rate_limit_status and the inoreader://rate-limits resource. */
 export function formatZone(zone: ZoneState, name: string) {
-  const remaining = zone.limit !== null && zone.usage !== null ? zone.limit - zone.usage : "unknown";
+  const now = Date.now();
+  const resetAt = zone.resetObservedAt !== undefined && zone.resetAfterSec !== null
+    ? zone.resetObservedAt + zone.resetAfterSec * 1000 : null;
+  const expired = observationExpired(zone, now);
+  const remaining = !expired && !limitExpired(zone, now) && zone.limit !== null && zone.usage !== null ? Math.max(0, zone.limit - zone.usage) : "unknown";
   return {
     zone: name,
     used: zone.usage ?? "unknown",
+    conservative_usage_for_admission: zone.conservativeUsage ?? zone.usage ?? "unknown",
     limit: zone.limit ?? "unknown",
     remaining,
-    reset_in_minutes: zone.resetAfterSec !== null ? Math.ceil(zone.resetAfterSec / 60) : "unknown",
+    reset_in_minutes: resetAt !== null ? Math.max(0, Math.ceil((resetAt - now) / 60_000)) : "unknown",
+    reset_at: resetAt !== null ? new Date(resetAt).toISOString() : null,
+    reset_observed_at: zone.resetObservedAt ? new Date(zone.resetObservedAt).toISOString() : null,
+    usage_observed_at: zone.usageObservedAt ? new Date(zone.usageObservedAt).toISOString() : null,
+    limit_observed_at: zone.limitObservedAt ? new Date(zone.limitObservedAt).toISOString() : null,
+    observation_expired: expired,
+    limit_observation_expired: limitExpired(zone, now),
+    local_attempts_since_usage: Math.max(0, (zone.attemptCount ?? 0) - (zone.usageAttemptCount ?? 0)),
+    cooldown_until: (zone.cooldownUntil ?? 0) > now ? new Date(zone.cooldownUntil!).toISOString() : null,
     last_updated: zone.lastUpdated ? new Date(zone.lastUpdated).toISOString() : "never",
   };
 }
 
-/** Full snapshot for reporting, including the local floor counter. */
+/** Full snapshot for reporting, including the local attempt counter. */
 export function snapshot() {
   const state = getState();
   return {
-    zone1_reads: formatZone(state.zone1, "reads"),
-    zone2_writes: formatZone(state.zone2, "writes"),
+    snapshot_at: new Date().toISOString(),
+    zone1_reads: { ...formatZone(state.zone1, "reads"), admission: zoneRemaining(1) },
+    zone2_writes: { ...formatZone(state.zone2, "writes"), admission: zoneRemaining(2) },
+    policy: "Zero upstream requests. Headers are authoritative only at observation time; later local attempts are conservative estimates. Other clients and processes can consume quota unseen. Expired/missing usage or limit provenance means unknown, not free calls. Limits and usage without a reset header are treated as stale after 24h (local freshness policy, not an inferred upstream reset). Admission and concurrency are per process; persisted snapshots are best-effort, not a cross-process lock.",
     counted_locally_today: {
       day: state.local.dayKey,
       zone1: state.local.zone1Count,
       zone2: state.local.zone2Count,
-      note: "Requests this client made today. A floor, not the server's count.",
+      note: "Every attempted API fetch including retries and transport failures, UTC day. Not necessarily charged by the server and not a quota total; OAuth and public-site requests are not Zone 1/2 API calls.",
     },
     ...(Object.keys(state.unknownHeaders).length > 0
       ? { unrecognized_x_reader_headers: state.unknownHeaders }

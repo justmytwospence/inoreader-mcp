@@ -76,6 +76,7 @@ export function renderFolderWriteResult(
 
   return {
     isError: report.verified < report.intended,
+    structuredContent: payload,
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
   };
 }

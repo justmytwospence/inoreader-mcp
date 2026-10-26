@@ -1,7 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
-import { renderFolderWriteResult } from "../results.js";
+import { BulkWriteResultSchema, renderFolderWriteResult } from "../results.js";
+import { assertBudget } from "../rate-limit.js";
+import { jsonResult } from "../contracts.js";
 import { applyFolderIntents, type FolderIntent } from "../verify.js";
 import type { SubscriptionListResponse } from "../types.js";
 
@@ -93,10 +95,10 @@ export function normalizeFeedTitle(title: string, siteUrl?: string): string {
 
 const BatchEditSchema = z.array(
   z.object({
-    stream_id: z.string().describe("Stream ID of the feed"),
-    add_to_folder: z.string().describe("Folder name to add the feed to"),
+    stream_id: z.string().min(1).max(8192).describe("Stream ID of the feed"),
+    add_to_folder: z.string().min(1).max(8192).describe("Folder name to add the feed to"),
   })
-);
+).min(1).max(1000);
 
 /** Flatten a {folder: [streamId, ...]} map into intents. */
 function toIntents(assignments: Record<string, string[]>): FolderIntent[] {
@@ -108,7 +110,7 @@ function toIntents(assignments: Record<string, string[]>): FolderIntent[] {
 }
 
 export function registerSubscriptionTools(server: McpServer): void {
-  server.registerTool("batch_edit_subscriptions", { description: "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reports only assignments confirmed present on the server.", inputSchema: z.object({
+  server.registerTool("batch_edit_subscriptions", { title: "Batch edit subscriptions", outputSchema: BulkWriteResultSchema, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Deprecated: use categorize_feeds instead (more reliable, folder-centric input). Add multiple feeds to folders. Base cost is 1 Zone 2 request per assignment and 1-3 Zone 1 verification reads; reconciliation may add 1 Zone 2 per shortfall. Preflight requires worst-case headroom; read retries cost extra. Reports only assignments confirmed present on the server. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               edits: BatchEditSchema.describe("Array of edits to apply"),
             }) }, async (params) => {
               const assignments: Record<string, string[]> = {};
@@ -120,7 +122,7 @@ export function registerSubscriptionTools(server: McpServer): void {
               return renderFolderWriteResult(report);
             });
 
-  server.registerTool("list_subscriptions", { annotations: { readOnlyHint: true }, description: "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("list_subscriptions", { title: "List subscriptions", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               folder: z
                 .string()
                 .optional()
@@ -130,13 +132,13 @@ export function registerSubscriptionTools(server: McpServer): void {
                 .optional()
                 .describe("Filter by title or URL (case-insensitive substring match)"),
               limit: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(500)
                 .optional()
                 .describe("Max subscriptions to return (default 100)"),
               offset: z
-                .number()
+                .number().int()
                 .min(0)
                 .optional()
                 .describe("Number of subscriptions to skip (default 0)"),
@@ -177,24 +179,17 @@ export function registerSubscriptionTools(server: McpServer): void {
               const limit = params.limit ?? 100;
               const page = subs.slice(offset, offset + limit);
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify({
+              return jsonResult({
                       subscriptions: page,
                       total,
                       showing: `${offset + 1}-${offset + page.length} of ${total}`,
                       ...(offset + page.length < total
                         ? { next_offset: offset + limit }
                         : {}),
-                    }),
-                  },
-                ],
-              };
+                    });
             });
 
-  server.registerTool("suggest_feed_cleanup", { annotations: { readOnlyHint: true }, description: "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("suggest_feed_cleanup", { title: "Suggest feed cleanup", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               include_unchanged: z
                 .boolean()
                 .optional()
@@ -224,25 +219,14 @@ export function registerSubscriptionTools(server: McpServer): void {
                 })
                 .filter((f) => (params.include_unchanged ? true : f.changed));
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         uncategorized_count: uncategorized.length,
                         rename_count: feeds.filter((f) => f.changed).length,
                         feeds,
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      });
             });
 
-  server.registerTool("get_uncategorized_feeds", { annotations: { readOnlyHint: true }, description: "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("get_uncategorized_feeds", { title: "Get uncategorized feeds", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               include_url: z
                 .boolean()
                 .optional()
@@ -263,42 +247,33 @@ export function registerSubscriptionTools(server: McpServer): void {
                   : [s.id, s.title]
               );
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         uncategorized_count: uncategorized.length,
                         total_count: data.subscriptions.length,
                         feeds,
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      });
             });
 
-  server.registerTool("categorize_feeds", { description: "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Costs 1 Zone 2 request per feed, plus 2 Zone 1 requests to verify the result regardless of batch size. Reads the subscription list back afterwards and retries anything that did not land, so the counts reflect what is actually on the server; sets isError when fewer changes were confirmed than requested.", inputSchema: z.object({
+  server.registerTool("categorize_feeds", { title: "Categorize feeds", outputSchema: BulkWriteResultSchema, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Assign feeds to folders in bulk. Pass a map of {folder_name: [stream_id, ...]}. Typical workflow: call get_uncategorized_feeds first, decide categories, then call this tool. Base cost is 1 Zone 2 request per assignment and 1-3 Zone 1 verification reads; reconciliation may add 1 Zone 2 per shortfall. Preflight requires worst-case headroom; read retries cost extra. Reads the subscription list back afterwards and retries anything that did not land, so the counts reflect what is actually on the server; sets isError when fewer changes were confirmed than requested. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               assignments: z
                 .record(
-                  z.string(),
-                  z.array(z.string())
+                  z.string().min(1).max(8192),
+                  z.array(z.string().min(1).max(8192))
                 )
-                .describe("Map of folder name to array of stream IDs to assign"),
+                .refine((map) => Object.values(map).reduce((n, ids) => n + ids.length, 0) <= 1000, "At most 1000 assignments")
+                .describe("Map of folder name to array of stream IDs to assign (max 1000 assignments)"),
             }) }, async (params) => {
               const report = await applyFolderIntents(toIntents(params.assignments));
               return renderFolderWriteResult(report);
             });
 
-  server.registerTool("reassign_feeds", { description: "Move feeds from one folder to another in bulk. Pass from_folder and a map of {new_folder: [stream_id, ...]}. Costs 1 Zone 2 request per feed (add and remove travel in one call), plus 2 Zone 1 requests to verify the result regardless of batch size. A feed counts as moved only when the subscription list shows it in the destination AND no longer in the source; anything short of that is retried with the add and remove split into separate calls, and reported as unverified with isError set if it still does not land.", inputSchema: z.object({
+  server.registerTool("reassign_feeds", { title: "Reassign feeds", outputSchema: BulkWriteResultSchema, annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }, description: "Move feeds from one folder to another in bulk. Pass from_folder and a map of {new_folder: [stream_id, ...]}. Base cost is 1 Zone 2 request per assignment (combined add/remove), plus 1-3 Zone 1 verification reads. Reconciliation may add 2 Zone 2 requests per shortfall. Preflight requires worst-case headroom; read retries cost extra. A feed counts as moved only when the subscription list shows it in the destination AND no longer in the source; anything short of that is retried with the add and remove split into separate calls, and reported as unverified with isError set if it still does not land. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               from_folder: z
                 .string()
                 .describe("Folder name to remove all feeds from"),
               assignments: z
-                .record(z.string(), z.array(z.string()))
+                .record(z.string().min(1).max(8192).min(1).max(512), z.array(z.string().min(1).max(8192).min(1).max(8192)).min(1).max(1000))
+                .refine((map) => Object.values(map).reduce((n, ids) => n + ids.length, 0) <= 1000, "At most 1000 assignments")
                 .describe("Map of new folder name to array of stream IDs to move there"),
             }) }, async (params) => {
               const report = await applyFolderIntents(toIntents(params.assignments), {
@@ -307,14 +282,14 @@ export function registerSubscriptionTools(server: McpServer): void {
               return renderFolderWriteResult(report, { from_folder: params.from_folder });
             });
 
-  server.registerTool("rename_folder", { description: "Rename a folder/label. All feeds in the old folder are moved to the new name. Costs 1 Zone 2 request.", inputSchema: z.object({
-              old_name: z.string().describe("Current folder name"),
-              new_name: z.string().describe("New folder name"),
+  server.registerTool("rename_folder", { title: "Rename folder", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, description: "Rename a folder/label. All feeds in the old folder are moved to the new name. Costs 1 Zone 2 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
+              old_name: z.string().min(1).max(8192).describe("Current folder name"),
+              new_name: z.string().min(1).max(8192).describe("New folder name"),
             }) }, async (params) => {
               await apiPost<string>("/reader/api/0/rename-tag", {
                 s: `user/-/label/${params.old_name}`,
                 dest: `user/-/label/${params.new_name}`,
-              });
+              }, undefined, { expectOk: true });
               return {
                 content: [
                   {
@@ -325,7 +300,7 @@ export function registerSubscriptionTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("manage_subscription", { description: "Add, edit, or remove an RSS feed subscription. Costs 1 Zone 2 request, plus 1 Zone 1 request on edit to read the result back. An edit returns the feed's resulting title and folders with an `applied` flag, so you can see whether the change landed -- if `applied` is true the work is done, do not repeat the call.", inputSchema: z.object({
+  server.registerTool("manage_subscription", { title: "Manage subscription", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, description: "Add, edit, or remove an RSS feed subscription. Base cost: subscribe 1 Zone 2 (+1 for optional title/folder edit), edit 1 Zone 2 + 1 Zone 1 read-back, unsubscribe 1 Zone 2. No ambiguous write is replayed; read retries cost extra. An edit returns the feed's resulting title and folders with an `applied` flag, so you can see whether the change landed -- if `applied` is true the work is done, do not repeat the call. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               action: z
                 .enum(["subscribe", "edit", "unsubscribe"])
                 .describe("Action to perform"),
@@ -337,7 +312,7 @@ export function registerSubscriptionTools(server: McpServer): void {
                 .string()
                 .optional()
                 .describe("Stream ID of existing feed (required for edit/unsubscribe)"),
-              title: z.string().optional().describe("New title for the feed"),
+              title: z.string().min(1).max(8192).optional().describe("New title for the feed"),
               add_to_folder: z
                 .string()
                 .optional()
@@ -347,6 +322,8 @@ export function registerSubscriptionTools(server: McpServer): void {
                 .optional()
                 .describe("Folder name to remove the feed from"),
             }) }, async (params) => {
+              assertBudget(2, params.action === "subscribe" && (params.title || params.add_to_folder) ? 2 : 1, "manage_subscription");
+              if (params.action === "edit") assertBudget(1, 1, "manage_subscription read-back");
               if (params.action === "subscribe") {
                 if (!params.feed_url) {
                   return {
@@ -371,7 +348,7 @@ export function registerSubscriptionTools(server: McpServer): void {
                   };
                   if (params.title) editBody.t = params.title;
                   if (params.add_to_folder) editBody.a = `user/-/label/${params.add_to_folder}`;
-                  await apiPost<string>("/reader/api/0/subscription/edit", editBody);
+                  await apiPost<string>("/reader/api/0/subscription/edit", editBody, undefined, { expectOk: true });
                 }
 
                 return {
@@ -400,7 +377,7 @@ export function registerSubscriptionTools(server: McpServer): void {
                 await apiPost<string>("/reader/api/0/subscription/edit", {
                   ac: "unsubscribe",
                   s: params.stream_id,
-                });
+                }, undefined, { expectOk: true });
                 return {
                   content: [
                     { type: "text" as const, text: `Unsubscribed from ${params.stream_id}` },
@@ -456,13 +433,7 @@ export function registerSubscriptionTools(server: McpServer): void {
                 (!params.remove_from_folder ||
                   !actual.folders.some((f) => norm(f) === norm(params.remove_from_folder!)));
 
-              return {
-                isError: actual !== null && !applied,
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         stream_id: params.stream_id,
                         requested: wanted,
                         applied,
@@ -481,12 +452,6 @@ export function registerSubscriptionTools(server: McpServer): void {
                                 "this call; the same request has already been accepted once.",
                             }
                           : {}),
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      }, !applied);
             });
 }

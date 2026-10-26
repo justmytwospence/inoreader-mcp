@@ -99,14 +99,25 @@ export interface UserInfoResponse {
 export interface ZoneState {
   limit: number | null;
   usage: number | null;
+  /** Conservative admission floor for out-of-order responses; not a raw header. */
+  conservativeUsage?: number;
   resetAfterSec: number | null;
+  /** Timestamp of this zone's latest limit/usage header, not an unrelated response. */
   lastUpdated: number;
+  limitObservedAt?: number;
+  usageObservedAt?: number;
+  usageExpiresAt?: number;
+  resetObservedAt?: number;
+  /** Monotone local attempt counter, independent of the UTC daily display. */
+  attemptCount?: number;
+  usageAttemptCount?: number;
+  cooldownUntil?: number;
 }
 
 export interface RateLimitState {
   zone1: ZoneState;
   zone2: ZoneState;
-  /** Requests this client made today. A floor; it cannot see other clients. */
+  /** Fetch attempts initiated today; not necessarily charged. Other clients are unseen. */
   local: { dayKey: string; zone1Count: number; zone2Count: number };
   /** Any x-reader-* header we do not recognise, so a rename is visible. */
   unknownHeaders: Record<string, string>;

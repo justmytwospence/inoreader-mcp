@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
+import { assertBudget } from "../rate-limit.js";
+import { jsonResult } from "../contracts.js";
 import {
   COMMON_FEED_PATHS,
   discoverFeedLinks,
@@ -31,10 +33,7 @@ interface Candidate {
   reason: string;
 }
 
-const text = (value: unknown, isError = false) => ({
-  isError,
-  content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-});
+const text = (value: Record<string, unknown>, isError = false) => jsonResult(value, isError);
 
 const listSubscriptions = async (): Promise<InoreaderSubscription[]> =>
   (await apiGet<SubscriptionListResponse>("/reader/api/0/subscription/list", { output: "json" })).subscriptions;
@@ -51,14 +50,16 @@ export function registerRepairTools(server: McpServer): void {
   server.registerTool(
     "find_feed_replacement",
     {
-      annotations: { readOnlyHint: true },
+      title: "Find a feed replacement",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       description:
-        "Find a working feed for a subscription whose feed address is broken. Checks where the old address redirects, the feeds the site advertises (<link rel=alternate>), and conventional feed paths, then compares each candidate with the posts Inoreader stored from the old feed. confidence 'high' means the candidate carries posts from the old feed or the old address redirects to it; 'medium' means same site but no shared posts; 'low' is anything else. `recommended` is the best high-confidence candidate, or null. Makes NO changes -- apply one with replace_feed. Costs 2 Zone 1 requests, plus up to ~30 fetches of the site itself (not Inoreader).",
+        "Find a working feed for a subscription whose feed address is broken. Checks where the old address redirects, the feeds the site advertises (<link rel=alternate>), and conventional feed paths, then compares each candidate with the posts Inoreader stored from the old feed. confidence 'high' means the candidate carries posts from the old feed or the old address redirects to it; 'medium' means same site but no shared posts; 'low' is anything else. `recommended` is the best high-confidence candidate, or null. Makes NO changes -- apply one with replace_feed. Costs 2 Zone 1 requests, plus up to 35 public-site fetch operations (each up to 6 HTTP requests including redirects, not Zone 1 API calls; shared process concurrency is capped at 4). Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.",
       inputSchema: z.object({
-        stream_id: z.string().describe("Stream ID of the subscription, e.g. feed/https://example.com/rss"),
+        stream_id: z.string().min(1).max(8192).describe("Stream ID of the subscription, e.g. feed/https://example.com/rss"),
       }),
     },
     async (params) => {
+      assertBudget(1, 2, "find_feed_replacement");
       const sub = (await listSubscriptions()).find((s) => s.id === params.stream_id);
       if (!sub) return text({ error: `no subscription ${params.stream_id}` }, true);
       const oldUrl = sub.url || params.stream_id.replace(/^feed\//, "");
@@ -150,14 +151,18 @@ export function registerRepairTools(server: McpServer): void {
   server.registerTool(
     "replace_feed",
     {
+      title: "Replace a feed subscription",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       description:
-        "Replace a subscription with a different feed URL, keeping its title and folders: subscribe to the new feed, put it in the same folders under the same title, confirm that landed, and only then unsubscribe the old one. If the new feed is already subscribed, its folders are topped up and the old one is removed. Read state of the old feed is not carried over. Use with find_feed_replacement. Costs 2-3 Zone 2 requests and 3 Zone 1 requests.",
+        "Replace a subscription with a different feed URL, keeping its title and folders: subscribe to the new feed, put it in the same folders under the same title, confirm that landed, and only then unsubscribe the old one. If the new feed is already subscribed, its folders are topped up and the old one is removed. Read state of the old feed is not carried over. Use with find_feed_replacement. Costs 2-3 Zone 2 requests and 3 Zone 1 requests. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.",
       inputSchema: z.object({
-        stream_id: z.string().describe("Stream ID of the subscription to replace"),
-        new_feed_url: z.string().url().describe("Feed URL to subscribe to instead"),
+        stream_id: z.string().min(1).max(8192).describe("Stream ID of the subscription to replace"),
+        new_feed_url: z.string().max(8192).url().refine((url) => /^https?:\/\//i.test(url), "Expected an HTTP(S) feed URL").describe("Feed URL to subscribe to instead"),
       }),
     },
     async (params) => {
+      assertBudget(1, 3, "replace_feed verification");
+      assertBudget(2, 3, "replace_feed");
       const subs = await listSubscriptions();
       const old = subs.find((s) => s.id === params.stream_id);
       if (!old) return text({ error: `no subscription ${params.stream_id}` }, true);
@@ -189,7 +194,7 @@ export function registerRepairTools(server: McpServer): void {
         return text({ error: "the new subscription did not land as asked; the old one was kept", new_stream_id: newId, missing_folders: missing }, true);
       }
 
-      await apiPost<string>("/reader/api/0/subscription/edit", { ac: "unsubscribe", s: old.id });
+      await apiPost<string>("/reader/api/0/subscription/edit", { ac: "unsubscribe", s: old.id }, undefined, { expectOk: true });
       const gone = !(await listSubscriptions()).some((s) => s.id === old.id);
       return text(
         {

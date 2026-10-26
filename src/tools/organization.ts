@@ -2,6 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
 import { applyTagIntents, type TagIntent } from "../verify-tags.js";
+import { DateInput, jsonResult } from "../contracts.js";
+import { assertBudget } from "../rate-limit.js";
 import type { TagListResponse, UnreadCountResponse } from "../types.js";
 
 const SYSTEM_TAGS: Record<string, string> = {
@@ -18,9 +20,9 @@ function resolveTag(tag: string): string {
 }
 
 export function registerOrganizationTools(server: McpServer): void {
-  server.registerTool("manage_tags", { description: "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. To save/unsave a web page: add/remove_tag='saved-web-pages'. To protect a saved web page from cleanup: add_tag='Keep'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', 'saved-web-pages', 'Keep', or any custom label name. Costs 1 Zone 2 request per 50 articles, plus 1 Zone 1 request per 50 to read the tags back. Reports `verified` (confirmed on the server) separately from `unverified`, and sets an error when fewer landed than requested.", inputSchema: z.object({
+  server.registerTool("manage_tags", { title: "Manage tags", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }, description: "Mark articles as read/unread/starred, or apply/remove custom tags. To mark as read: add_tag='read'. To star: add_tag='starred'. To unstar: remove_tag='starred'. To save/unsave a web page: add/remove_tag='saved-web-pages'. To protect a saved web page from cleanup: add_tag='Keep'. Supports batch operations on multiple articles. Use friendly names: 'read', 'starred', 'like', 'broadcast', 'saved-web-pages', 'Keep', or any custom label name. Base cost is 1 Zone 2 + 1 Zone 1 per 50 articles; observed shortfalls can require a second write/read round. Preflights both rounds; safe-read retries cost extra. Reports `verified` (confirmed on the server) separately from `unverified`, and sets an error when fewer landed than requested. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               article_ids: z
-                .array(z.string())
+                .array(z.string().min(1).max(8192).min(1).max(512)).min(1).max(1000)
                 .describe("One or more article IDs to modify"),
               add_tag: z
                 .string()
@@ -58,13 +60,7 @@ export function registerOrganizationTools(server: McpServer): void {
               // requested, never of what applied. These tags are the calibration tools'
               // ground truth, so an unnoticed drop corrupts the analysis downstream.
               const notApplied = report.items.filter((i) => i.status !== "verified");
-              return {
-                isError: report.verified < report.intended,
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         ...(params.add_tag ? { added: params.add_tag } : {}),
                         ...(params.remove_tag ? { removed: params.remove_tag } : {}),
                         intended: report.intended,
@@ -76,21 +72,14 @@ export function registerOrganizationTools(server: McpServer): void {
                         rounds: report.rounds,
                         ...(report.verify_error ? { warning: report.verify_error } : {}),
                         ...(notApplied.length > 0 ? { not_applied: notApplied } : {}),
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      }, report.verified < report.intended);
             });
 
-  server.registerTool("mark_all_read", { description: "Mark all articles in a feed or folder as read. Costs 1 Zone 2 request.", inputSchema: z.object({
+  server.registerTool("mark_all_read", { title: "Mark all read", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, description: "Mark all articles in a feed or folder as read. Costs 1 Zone 2 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               stream_id: z
                 .string()
                 .describe("Stream ID of the feed or folder to mark as read"),
-              before: z
-                .string()
+              before: DateInput
                 .optional()
                 .describe(
                   "ISO date - only mark items older than this as read (defaults to now)"
@@ -103,7 +92,7 @@ export function registerOrganizationTools(server: McpServer): void {
               await apiPost<string>("/reader/api/0/mark-all-as-read", {
                 s: params.stream_id,
                 ts,
-              });
+              }, undefined, { expectOk: true });
 
               return {
                 content: [
@@ -115,9 +104,9 @@ export function registerOrganizationTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("remove_saved_web_pages", { description: "Remove saved web pages by article ID. Use get_saved_web_pages with filter 'removable' to find candidates (pages that are neither starred nor tagged 'Keep'). To protect a page from cleanup without starring it, use manage_tags with add_tag='Keep'. Costs 1 Zone 2 request per 50 pages plus Zone 1 reads to verify; reports only removals confirmed on the server.", inputSchema: z.object({
+  server.registerTool("remove_saved_web_pages", { title: "Remove saved web pages", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }, description: "Remove saved web pages by article ID. Use get_saved_web_pages with filter 'removable' to find candidates (pages that are neither starred nor tagged 'Keep'). To protect a page from cleanup without starring it, use manage_tags with add_tag='Keep'. Base cost is 1 Zone 2 + 1 Zone 1 per 50 pages, with up to a second round for observed shortfalls (preflighted); reports only removals confirmed on the server. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               article_ids: z
-                .array(z.string())
+                .array(z.string().min(1).max(8192))
                 .min(1)
                 .max(50)
                 .describe("Article IDs of saved web pages to remove"),
@@ -129,13 +118,7 @@ export function registerOrganizationTools(server: McpServer): void {
                 resolveTag
               );
               const notApplied = report.items.filter((i) => i.status !== "verified");
-              return {
-                isError: report.verified < report.intended,
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         intended: report.intended,
                         removed: report.verified,
                         unverified: report.unverified,
@@ -145,16 +128,11 @@ export function registerOrganizationTools(server: McpServer): void {
                         rounds: report.rounds,
                         ...(report.verify_error ? { warning: report.verify_error } : {}),
                         ...(notApplied.length > 0 ? { not_applied: notApplied } : {}),
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      }, report.verified < report.intended);
             });
 
-  server.registerTool("list_folders_and_tags", { annotations: { readOnlyHint: true }, description: "List all folders, tags, and labels with their unread counts. Note: only unread_count is available here; total_count (including read items) requires a separate get_article_ids call per tag. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
+  server.registerTool("list_folders_and_tags", { title: "List folders and tags", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "List all folders, tags, and labels with their unread counts. Only unread_count is available here; counts including read items require separate paginated get_article_ids calls per tag (1 extra Zone 1 request per IDs page, at most 10000 IDs/page). Costs 2 Zone 1 requests. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({}) }, async () => {
+              assertBudget(1, 2, "list_folders_and_tags");
               const [tags, unreadData] = await Promise.all([
                 apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json" }),
                 apiGet<UnreadCountResponse>("/reader/api/0/unread-count", {
@@ -172,23 +150,16 @@ export function registerOrganizationTools(server: McpServer): void {
                 unread_count: unreadMap.get(t.id) ?? 0,
               }));
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(result, null, 2),
-                  },
-                ],
-              };
+              return jsonResult(result);
             });
 
-  server.registerTool("batch_manage_tags", { description: "Apply different tags to different groups of articles in one call. Useful for triage workflows where you categorize items into multiple groups at once. Costs 1 Zone 2 request per 50 articles per operation, plus Zone 1 reads to verify. Reports verified/unverified per article and per operation, and sets an error when fewer landed than requested.", inputSchema: z.object({
+  server.registerTool("batch_manage_tags", { title: "Batch manage tags", annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }, description: "Apply different tags to different groups of articles in one call. Useful for triage workflows where you categorize items into multiple groups at once. Base cost is 1 Zone 2 per 50 articles sharing an add/remove pair, plus 1 Zone 1 per 50 article intents to verify, with up to a second round for observed shortfalls (preflighted). Reports verified/unverified per article and per operation, and sets an error when fewer landed than requested. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
               operations: z
                 .array(
                   z.object({
                     article_ids: z
-                      .array(z.string())
-                      .min(1)
+                      .array(z.string().min(1).max(8192).min(1).max(512))
+                      .min(1).max(1000)
                       .describe("Article IDs to modify"),
                     add_tag: z
                       .string()
@@ -200,8 +171,9 @@ export function registerOrganizationTools(server: McpServer): void {
                       .describe("Tag to remove (same options as add_tag)"),
                   })
                 )
-                .min(1)
-                .describe("Array of tag operations to perform"),
+                .min(1).max(100)
+                .refine((ops) => ops.reduce((sum, op) => sum + op.article_ids.length, 0) <= 1000, "At most 1000 article intents per call")
+                .describe("Array of tag operations to perform (max 100 operations and 1000 article intents)"),
             }) }, async (params) => {
               // Flatten every operation into per-article intents so the result can report
               // what landed per ARTICLE. The old shape counted operations and echoed
@@ -248,13 +220,7 @@ export function registerOrganizationTools(server: McpServer): void {
 
               const notApplied = report.items.filter((i) => i.status !== "verified");
 
-              return {
-                isError: report.verified < report.intended || invalid.length > 0,
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         operations: perOp,
                         intended: report.intended,
                         verified: report.verified,
@@ -266,12 +232,6 @@ export function registerOrganizationTools(server: McpServer): void {
                         ...(report.verify_error ? { warning: report.verify_error } : {}),
                         ...(invalid.length > 0 ? { rejected_operations: invalid } : {}),
                         ...(notApplied.length > 0 ? { not_applied: notApplied } : {}),
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      }, report.verified < report.intended || invalid.length > 0);
             });
 }

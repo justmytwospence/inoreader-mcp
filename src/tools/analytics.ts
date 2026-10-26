@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet } from "../api.js";
-import { snapshot, zoneRemaining } from "../rate-limit.js";
+import { assertBudget, snapshot, zoneRemaining } from "../rate-limit.js";
+import { jsonResult } from "../contracts.js";
 import type {
   SubscriptionListResponse,
   UnreadCountResponse,
@@ -12,7 +13,8 @@ import type {
 } from "../types.js";
 
 export function registerAnalyticsTools(server: McpServer): void {
-  server.registerTool("analyze_feeds", { annotations: { readOnlyHint: true }, description: "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Feeds added partway through the window are slightly penalized (volume includes pre-subscription articles as 'skipped'), since Inoreader's API does not expose a reliable per-user subscription start date. Engagement pagination terminates naturally when the time filter is exhausted, so coverage is exhaustive within the window and not bounded by guesswork; the engagement_pages parameter only acts as a per-tag runaway safety cap. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Costs 3 + (engagement pages until the window is exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests EVERY call -- this is the most expensive tool here, and there is no caching between calls. Check get_rate_limit_status first on a large account.", inputSchema: z.object({
+  server.registerTool("analyze_feeds", { title: "Analyze feeds", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Feeds added partway through the window are slightly penalized (volume includes pre-subscription articles as 'skipped'), since Inoreader's API does not expose a reliable per-user subscription start date. Engagement pagination stops at the time window, per-tag engagement_pages cap, total max_requests cap, errors or known quota reserve; coverage is NOT exhaustive when capped/degraded. Missing engagement must not be treated as evidence of no interest. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Costs 3 + (engagement pages until the window is exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests EVERY call -- this is the most expensive tool here, and there is no caching between calls. Check get_rate_limit_status first on a large account. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
+              max_requests: z.number().int().min(3).max(500).optional().describe("Maximum base Zone 1 calls across this workflow (default 100); retries are extra. Leaves 25 known requests in reserve and reports partial coverage."),
               folder: z
                 .string()
                 .optional()
@@ -34,19 +36,19 @@ export function registerAnalyticsTools(server: McpServer): void {
                 .optional()
                 .describe("Beta prior pseudo-observation count (default 10). Higher values shrink small-sample feeds more aggressively toward the global mean."),
               engagement_pages: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(500)
                 .optional()
                 .describe("Per-tag safety cap on engagement pages (100 items per page, default 100). Pagination normally ends naturally when the ot time filter is exhausted; this cap only binds for users with thousands of engaged items per tag in the window."),
               volume_sample: z
-                .number()
+                .number().int()
                 .min(0)
                 .max(200)
                 .optional()
                 .describe("How many never-engaged active feeds to also count volume for, to rank noise (default 0). Set higher to find the noisiest unengaged feeds, at 1 extra API call each."),
               limit: z
-                .number()
+                .number().int()
                 .min(1)
                 .max(500)
                 .optional()
@@ -57,6 +59,9 @@ export function registerAnalyticsTools(server: McpServer): void {
                 .describe("No-op, retained for compatibility. Reads are not cached between calls."),
             }) }, async (params) => {
 
+              assertBudget(1, 3, "analyze_feeds initial reads", 25);
+              const maxRequests = params.max_requests ?? 100;
+              const degraded: string[] = [];
               const monthsBack = params.months ?? 12;
               const globalSinceSec = Math.floor(
                 (Date.now() - monthsBack * 30 * 24 * 60 * 60 * 1000) / 1000
@@ -67,13 +72,13 @@ export function registerAnalyticsTools(server: McpServer): void {
               const [subData, unreadData, tagData] = await Promise.all([
                 apiGet<SubscriptionListResponse>("/reader/api/0/subscription/list", {
                   output: "json",
-                }),
+                }, { reserve: 25 }),
                 apiGet<UnreadCountResponse>("/reader/api/0/unread-count", {
                   output: "json",
-                }),
+                }, { reserve: 25 }),
                 apiGet<TagListResponse>("/reader/api/0/tag/list", {
                   output: "json",
-                }),
+                }, { reserve: 25 }),
               ]);
 
               // Determine which tags represent engagement (not folders or passive states)
@@ -111,12 +116,18 @@ export function registerAnalyticsTools(server: McpServer): void {
               let safetyCapHit = false;
               let z1Cost = 3; // subscriptions + unread counts + tag list
 
-              for (const tagId of engagementTagIds) {
+              engagement: for (const tagId of engagementTagIds) {
                 let continuation: string | undefined;
                 let tagPages = 0;
                 let reachedWindowEdge = false;
 
                 while (tagPages < perTagPageCap) {
+                  const remaining = zoneRemaining(1).remaining;
+                  if (z1Cost >= maxRequests || (remaining !== null && remaining <= 25)) {
+                    degraded.push("Engagement scan stopped at workflow/known quota budget; unscanned tags are NOT evidence of no engagement.");
+                    safetyCapHit = true;
+                    break engagement;
+                  }
                   const queryParams: Record<string, string> = {
                     output: "json",
                     n: "100",
@@ -125,17 +136,19 @@ export function registerAnalyticsTools(server: McpServer): void {
                   if (continuation) queryParams.c = continuation;
 
                   let data: StreamContentsResponse;
+                  z1Cost++;
                   try {
                     data = await apiGet<StreamContentsResponse>(
                       `/reader/api/0/stream/contents/${encodeURIComponent(tagId)}`,
-                      queryParams
+                      queryParams, { reserve: 25 }
                     );
-                  } catch {
-                    break; // Tag stream not fetchable, skip it
+                  } catch (e) {
+                    degraded.push(`Engagement stream ${tagId} failed: ${String(e)}`);
+                    safetyCapHit = true;
+                    break;
                   }
                   pagesUsed++;
                   tagPages++;
-                  z1Cost++;
 
                   for (const item of data.items) {
                     // Defensive: stop if API ignored the ot filter and returned
@@ -178,6 +191,8 @@ export function registerAnalyticsTools(server: McpServer): void {
 
               async function countFeedArticles(feedId: string): Promise<void> {
                 try {
+                  assertBudget(1, 1, "analyze_feeds volume", 25);
+                  z1Cost++;
                   const data = await apiGet<StreamItemIdsResponse>(
                     "/reader/api/0/stream/items/ids",
                     {
@@ -185,22 +200,22 @@ export function registerAnalyticsTools(server: McpServer): void {
                       ot: sinceTimestamp,
                       n: "10000",
                       output: "json",
-                    }
+                    }, { reserve: 25 }
                   );
-                  z1Cost++;
+                  if (data.continuation) degraded.push(`Volume for ${feedId} is capped at 10000 IDs; ranking is approximate.`);
                   const apiCount = (data.itemRefs ?? []).length;
                   const engaged = engagedCountByFeed.get(feedId) ?? 0;
                   // Floor at engaged count: engaged items survive Inoreader's purge
                   // longer than the feed stream, so the API can undercount
                   totalArticlesByFeed.set(feedId, Math.max(apiCount, engaged));
-                } catch {
-                  // Feed may no longer be valid
+                } catch (e) {
+                  degraded.push(`Volume unavailable for ${feedId}: ${String(e)}`);
                 }
               }
 
               // 1. Fetch volume for engaged feeds (only when sort needs it)
               const engagedFeedIds = [...engagedCountByFeed.keys()];
-              const BATCH_SIZE = 50;
+              const BATCH_SIZE = 4;
               const sortBy = params.sort_by ?? "unengaged_per_month";
               const needsVolume = sortBy !== "engaged_count" && sortBy !== "title" && sortBy !== "days_since_newest";
 
@@ -209,8 +224,9 @@ export function registerAnalyticsTools(server: McpServer): void {
               // budget by itself and leave every other tool failing for the rest of the day.
               // Degrade loudly instead -- the ranking is weaker without volume, but a report
               // that says so beats an exhausted budget nobody was told about.
-              const degraded: string[] = [];
-              const budgetFor = (want: number): number => {
+              const budgetFor = (requested: number): number => {
+                const want = Math.min(requested, Math.max(0, maxRequests - z1Cost));
+                if (want < requested) degraded.push(`Workflow request cap: skipped ${requested - want} volume reads.`);
                 const { remaining, source } = zoneRemaining(1);
                 if (remaining === null) return want; // nothing known; do not invent a limit
                 const spendable = Math.max(0, remaining - 25); // leave headroom for other tools
@@ -446,6 +462,7 @@ export function registerAnalyticsTools(server: McpServer): void {
                 engagement_tags_used: engagementTagIds.length,
                 engagement_tag_ids: engagementTagIds,
                 api_cost_z1: z1Cost,
+                cost_basis: "Base calls scheduled (including failed calls); safe-read retries are extra and counted in rate-limit status. Not a monetary charge.",
                 ...(degraded.length > 0 ? { degraded } : {}),
                 volume_feeds_counted: totalArticlesByFeed.size,
                 prior: {
@@ -472,52 +489,27 @@ export function registerAnalyticsTools(server: McpServer): void {
               const truncated = feeds.length > maxFeeds;
               const returnedFeeds = feeds.slice(0, maxFeeds);
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify({
+              return jsonResult({
                       summary,
                       feeds: returnedFeeds,
                       ...(truncated ? { truncated: true, showing: `${maxFeeds} of ${feeds.length}` } : {}),
-                    }, null, 2),
-                  },
-                ],
-              };
+                    });
             });
 
-  server.registerTool("get_rate_limit_status", { annotations: { readOnlyHint: true }, description: "Check current API rate limit usage and remaining budget. Reads persisted rate-limit state written by earlier calls; costs 0 requests.", inputSchema: z.object({}) }, async () => {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(snapshot(), null, 2),
-                  },
-                ],
-              };
+  server.registerTool("get_rate_limit_status", { title: "Get rate limit status", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Check cached quota observations, reset/cooldown times and conservative local estimates. Costs 0 HTTP/auth requests. Header usage is authoritative only at observation time; missing/expired values mean unknown, not free calls. Every attempted API fetch (including retries and failures) is counted locally; other clients/processes are unseen. See inoreader://usage for request costs, URI examples and all workflow prompts.", inputSchema: z.object({}) }, async () => {
+              return jsonResult(snapshot());
             });
 
-  server.registerTool("get_user_info", { annotations: { readOnlyHint: true }, description: "Get current authenticated user information. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
+  server.registerTool("get_user_info", { title: "Get user info", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Get current authenticated user information. Costs 1 Zone 1 request. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({}) }, async () => {
               const data = await apiGet<UserInfoResponse>("/reader/api/0/user-info");
 
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: JSON.stringify(
-                      {
+              return jsonResult({
                         user_id: data.userId,
                         user_name: data.userName,
                         email: data.userEmail,
                         signup_date: new Date(
                           data.signupTimeSec * 1000
                         ).toISOString(),
-                      },
-                      null,
-                      2
-                    ),
-                  },
-                ],
-              };
+                      });
             });
 }

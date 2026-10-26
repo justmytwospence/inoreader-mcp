@@ -69,6 +69,15 @@ test("non-numeric values are rejected rather than becoming NaN", () => {
   assert.equal(p.zone1.limit, null);
 });
 
+test("malformed, fractional and negative counters are unknown, and renamed zone headers remain visible", () => {
+  for (const value of ["-1", "2x", "1.5", "Infinity", "9007199254740992"]) {
+    assert.equal(parseRateHeaders(new Headers({ "x-reader-zone1-usage": value })).zone1.usage, null);
+  }
+  const parsed = parseRateHeaders(new Headers({ "x-reader-zone2-remaining": "2", "x-reader-limits-reset-after": "9007199254740991" }));
+  assert.equal(parsed.unknown["x-reader-zone2-remaining"], "2");
+  assert.equal(parsed.resetAfterSec, null);
+});
+
 test("non-x-reader headers are ignored", () => {
   const p = parseRateHeaders(new Headers({ "content-type": "text/html", "x-other": "1" }));
   assert.deepEqual(p.unknown, {});

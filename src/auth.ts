@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { TokenData } from "./types.js";
+import { withHttpSlot } from "./concurrency.js";
 
 // INOREADER_CONFIG_DIR relocates the token and rate-limit state, e.g. onto a container volume.
 const CONFIG_DIR = process.env.INOREADER_CONFIG_DIR ?? join(homedir(), ".config", "inoreader-mcp");
@@ -99,6 +100,7 @@ export function getAuthUrl(): string {
 }
 
 export async function exchangeCode(code: string): Promise<TokenData> {
+  return withHttpSlot(async () => {
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     signal: AbortSignal.timeout(20_000),
@@ -126,9 +128,11 @@ export async function exchangeCode(code: string): Promise<TokenData> {
   saveTokens(tokens);
   cachedTokens = tokens;
   return tokens;
+  });
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<TokenData> {
+  return withHttpSlot(async () => {
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     signal: AbortSignal.timeout(20_000),
@@ -155,6 +159,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenData> {
   saveTokens(tokens);
   cachedTokens = tokens;
   return tokens;
+  });
 }
 
 export async function ensureValidToken(): Promise<string> {

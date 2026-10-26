@@ -9,7 +9,7 @@ writeFileSync(join(dir, "tokens.json"), JSON.stringify({
   access_token: "test", refresh_token: "test", expires_at: Date.now() + 3_600_000,
 }));
 process.env.INOREADER_CONFIG_DIR = dir;
-const { createServer } = await import("../src/server.js");
+const { connect } = await import("./wire.js");
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const reads = [
@@ -26,49 +26,23 @@ const writes = [
   "remove_saved_web_pages", "batch_manage_tags", "replace_feed",
 ];
 
-// Exercise the real wire protocol without adding a client dependency. The linked
-// in-memory endpoint sends requests to the SDK and captures its JSON-RPC replies.
-async function connect() {
-  const server = createServer();
-  type Transport = Parameters<typeof server.connect>[0];
-  const pending = new Map<number, (value: any) => void>();
-  const transport: Transport = {
-    async start() {},
-    async close() {},
-    async send(message) {
-      if ("id" in message && typeof message.id === "number") {
-        pending.get(message.id)?.(message);
-        pending.delete(message.id);
-      }
-    },
-  };
-  await server.connect(transport);
-  let id = 0;
-  const request = (method: string, params: Record<string, unknown> = {}) => new Promise<any>((resolve, reject) => {
-    const current = ++id;
-    const timer = setTimeout(() => reject(new Error(`timeout: ${method}`)), 5000);
-    pending.set(current, (response) => {
-      clearTimeout(timer);
-      if (response.error) reject(new Error(JSON.stringify(response.error)));
-      else resolve(response.result);
-    });
-    transport.onmessage?.({ jsonrpc: "2.0", id: current, method, params });
-  });
-  await request("initialize", {
-    protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" },
-  });
-  transport.onmessage?.({ jsonrpc: "2.0", method: "notifications/initialized" });
-  return { server, request };
-}
-
 test("tools/list exposes the complete audited read/write inventory", async () => {
   const { server, request } = await connect();
   try {
     const { tools } = await request("tools/list");
     assert.deepEqual(tools.map((t: any) => t.name).sort(), [...reads, ...writes].sort());
     for (const tool of tools) {
-      if (reads.includes(tool.name)) assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
-      else assert.notEqual(tool.annotations?.readOnlyHint, true, tool.name);
+      const write = writes.includes(tool.name);
+      assert.deepEqual(tool.annotations, {
+        readOnlyHint: !write,
+        destructiveHint: write && !["batch_edit_subscriptions", "categorize_feeds"].includes(tool.name),
+        idempotentHint: !["setup_auth", "rename_folder", "manage_subscription", "mark_all_read", "replace_feed"].includes(tool.name),
+        openWorldHint: tool.name !== "get_rate_limit_status",
+      }, tool.name);
+      assert.ok(tool.title?.length >= 8, `${tool.name} title`);
+      assert.ok(tool.description.length >= 80, `${tool.name} description`);
+      assert.match(tool.description, /inoreader:\/\/usage/, `${tool.name} discoverable guidance`);
+      assert.equal(tool.inputSchema.type, "object");
     }
   } finally {
     await server.close();
@@ -100,6 +74,8 @@ test("representative reads only use read endpoints, including the content POST",
     ] as const) {
       const result = await request("tools/call", { name, arguments: args });
       assert.notEqual(result.isError, true, JSON.stringify(result));
+      const value = JSON.parse(result.content[0].text);
+      assert.deepEqual(result.structuredContent, Array.isArray(value) ? { items: value } : value);
     }
     assert.equal(calls.length, 3);
   } finally {

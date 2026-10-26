@@ -1,5 +1,6 @@
 import { ensureValidToken } from "./auth.js";
-import { noteRequest, updateFromHeaders } from "./rate-limit.js";
+import { assertBudget, noteRequest, setCooldown, updateFromHeaders } from "./rate-limit.js";
+import { withHttpSlot } from "./concurrency.js";
 
 const BASE_URL = "https://www.inoreader.com";
 
@@ -38,8 +39,10 @@ function isRetryableStatus(status: number): boolean {
 function retryAfterMs(res: Response): number | null {
   const raw = res.headers.get("retry-after");
   if (!raw) return null;
-  const secs = Number.parseInt(raw, 10);
-  if (Number.isFinite(secs)) return secs * 1000;
+  if (/^\d+(\.\d+)?$/.test(raw.trim())) {
+    const ms = Number(raw) * 1000;
+    return Number.isFinite(ms) ? ms : null;
+  }
   const at = Date.parse(raw);
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : null;
 }
@@ -49,49 +52,42 @@ function backoffMs(attempt: number): number {
   return Math.random() * Math.min(RETRY.maxMs, RETRY.baseMs * 2 ** attempt);
 }
 
-/**
- * One fetch with timeout, honouring 429/Retry-After and retrying 5xx and transport
- * failures with jittered backoff.
- *
- * Retrying a POST is safe here because Inoreader's edit endpoints are idempotent set
- * operations: adding a label a feed already carries, removing one it does not, or
- * subscribing to a feed already subscribed are all no-ops. Do not extend this to an
- * endpoint where that stops being true.
+/** Reads alone may retry. Writes with lost/5xx responses have ambiguous outcomes:
+ * never replay them here. Bulk writers reconcile only after observed read-back.
  */
-async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < RETRY.maxAttempts; attempt++) {
-    if (attempt > 0) await sleep(backoffMs(attempt - 1));
+async function fetchWithRetry(url: string, init: RequestInit, label: string, zone: 1 | 2, reserve = 0): Promise<Response> {
+  const maxAttempts = zone === 1 ? RETRY.maxAttempts : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // Admission and accounting are outside the transport catch: quota decisions
+    // must not be mistaken for transient fetch failures.
+    assertBudget(zone, 1, label, reserve);
+    const counts = noteRequest(zone);
+    let res: Response;
     try {
-      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
-      if (!isRetryableStatus(res.status) || attempt === RETRY.maxAttempts - 1) return res;
-
-      const wait = retryAfterMs(res);
-      if (wait !== null) {
-        // Being told to wait longer than we are willing to sleep is information the
-        // caller needs, not something to silently absorb.
-        if (wait > RETRY.ceilingMs) {
-          throw new Error(
-            `Inoreader asked us to back off ${Math.round(wait / 1000)}s on ${label} ` +
-              `(${res.status}); giving up rather than blocking the tool call.`
-          );
-        }
-        await sleep(wait);
-      }
+      // Do not hide redirect hops from accounting or replay a POST via 307/308.
+      res = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
     } catch (e) {
-      // A thrown backoff-ceiling error is a decision, not a transport failure.
-      if (e instanceof Error && e.message.includes("asked us to back off")) throw e;
-      lastError = e;
-      if (attempt === RETRY.maxAttempts - 1) break;
+      if (attempt + 1 === maxAttempts) {
+        throw new Error(`Inoreader request failed on ${label} after ${attempt + 1} attempt(s): ${String(e)}${zone === 2 ? ". Outcome unknown; read back before any further write. Not replayed." : ""}`);
+      }
+      await sleep(backoffMs(attempt));
+      continue;
     }
+    updateFromHeaders(res.headers, counts); // every response, including errors/retries
+    const retry = isRetryableStatus(res.status);
+    const wait = retry ? Math.max(retryAfterMs(res) ?? (res.status === 429 ? 1000 : 0), backoffMs(attempt)) : 0;
+    if (res.status === 429 || (retry && res.headers.has("retry-after"))) setCooldown(zone, wait);
+    if (!retry || attempt + 1 === maxAttempts) return res;
+    await res.body?.cancel();
+    if (wait > RETRY.ceilingMs) {
+      throw new Error(`Inoreader asked us to back off ${Math.ceil(wait / 1000)}s on ${label}; cooldown persisted, not sleeping past 60s.`);
+    }
+    await sleep(wait);
   }
-  throw new Error(
-    `Inoreader request failed on ${label} after ${RETRY.maxAttempts} attempts: ` +
-      (lastError instanceof Error ? lastError.message : String(lastError))
-  );
+  throw new Error(`Unreachable retry state on ${label}`);
 }
 
-export async function apiGet<T>(path: string, params?: Record<string, string | string[]>): Promise<T> {
+export async function apiGet<T>(path: string, params?: Record<string, string | string[]>, options?: { reserve?: number }): Promise<T> {
   const url = new URL(path, BASE_URL);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -106,7 +102,7 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
   }
 
   const token = await ensureValidToken();
-  noteRequest(1);
+  return withHttpSlot(async () => {
   const res = await fetchWithRetry(
     url.toString(),
     {
@@ -115,17 +111,16 @@ export async function apiGet<T>(path: string, params?: Record<string, string | s
         "User-Agent": "inoreader-mcp/0.1.0",
       },
     },
-    `GET ${path}`
+    `GET ${path}`, 1, options?.reserve
   );
-
-  updateFromHeaders(res.headers);
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Inoreader API error ${res.status} on GET ${path}: ${text}`);
+    throw new Error(`Inoreader API error ${res.status} on GET ${path}: ${text.slice(0, 2000)}`);
   }
 
   return await res.json() as T;
+  });
 }
 
 export async function apiPost<T>(
@@ -149,7 +144,7 @@ export async function apiPost<T>(
     encodedBody = new URLSearchParams(body);
   }
 
-  noteRequest(ZONE1_POST_PATHS.has(path) ? 1 : 2);
+  return withHttpSlot(async () => {
   const res = await fetchWithRetry(
     url.toString(),
     {
@@ -161,26 +156,24 @@ export async function apiPost<T>(
       },
       body: encodedBody,
     },
-    `POST ${path}`
+    `POST ${path}`, ZONE1_POST_PATHS.has(path) ? 1 : 2
   );
-
-  updateFromHeaders(res.headers);
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Inoreader API error ${res.status} on POST ${path}: ${text}`);
+    throw new Error(`Inoreader API error ${res.status} on POST ${path}: ${text.slice(0, 2000)}${ZONE1_POST_PATHS.has(path) ? "" : ". Not replayed; read back before further writes if the outcome is uncertain."}`);
   }
 
   const contentType = res.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
+  if (contentType.includes("application/json") && !options?.expectOk) {
     return res.json() as Promise<T>;
   }
 
   const text = await res.text();
   // Inoreader answers an applied edit with the literal body "OK" (verified against
   // subscription/edit: 200, text/html, body exactly "OK"). A 2xx carrying anything
-  // else means the request was accepted but not necessarily applied, so throw and
-  // let the caller's retry path run rather than bank a phantom success.
+  // else means the request was accepted but not necessarily applied. Throw, then
+  // read back before considering reconciliation; never blindly replay it.
   //
   // This is a cheap first filter, NOT a guarantee. Inoreader has been observed
   // returning 200 while applying only half of a combined add+remove edit, which is
@@ -192,4 +185,5 @@ export async function apiPost<T>(
     );
   }
   return text as unknown as T;
+  });
 }

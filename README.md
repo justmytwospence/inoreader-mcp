@@ -91,10 +91,20 @@ Context that MCP clients can read directly without tool calls.
 
 | Resource | URI | Description | API Cost |
 |----------|-----|-------------|----------|
-| `rate-limits` | `inoreader://rate-limits` | Current API rate limit usage and remaining budget | 0 |
-| `subscriptions` | `inoreader://subscriptions` | All feeds with id, title, URL, and folder assignments | 1 Z1 |
-| `folders` | `inoreader://folders` | Folder and tag structure | 1 Z1 |
-| `unread-counts` | `inoreader://unread-counts` | Unread counts per feed and folder (non-zero, sorted descending) | 1 Z1 |
+| `usage` | `inoreader://usage` | Local guide: costs, limits, all template examples and prompt names | 0 |
+| `rate-limits` | `inoreader://rate-limits` | Cached header observations, local attempt estimates, reset/cooldown timestamps | 0 |
+| `subscriptions` | `inoreader://subscriptions` | First 500 feeds with id, title, URL and folders; total/truncation disclosed | 1 Z1 |
+| `folders` | `inoreader://folders` | First 500 folders and tags each; totals/truncation disclosed | 2 Z1 |
+| `unread-counts` | `inoreader://unread-counts` | First 500 non-zero counts, descending; feed/folder counts overlap | 1 Z1 |
+
+Article content template: `inoreader://articles/{article_id}/content?max_chars={max_chars}`.
+Percent-encode the ID and supply a required integer `max_chars` from 1 to 20000;
+for example `inoreader://articles/123/content?max_chars=8000`. Reading it costs one
+Zone 1 content POST (safe-read retries extra). It returns bounded **stored HTML**,
+truncation and provenance, never starts full-text extraction or paid processing.
+The static usage guide includes these examples for clients that do not list templates
+or consume initialize instructions. Discovery and prompt retrieval perform no HTTP
+or account writes; live resource reads use the same authorized API as tools.
 
 ## Tools
 
@@ -117,16 +127,16 @@ Thin wrappers around individual Inoreader API endpoints.
 | Tool | Description | API Cost |
 |------|-------------|----------|
 | `list_subscriptions` | All feeds with folders, URLs, metadata | 1 Z1 |
-| `manage_subscription` | Subscribe, edit (rename/move), or unsubscribe | 1 Z2 |
+| `manage_subscription` | Subscribe, edit (rename/move), or unsubscribe | Subscribe 1-2 Z2; edit 1 Z2 + 1 Z1; unsubscribe 1 Z2 |
 
 #### Organization
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `manage_tags` | Mark read/unread/starred, apply/remove tags (batch support) | 1 Z2 |
-| `batch_manage_tags` | Apply different tags to different article groups in one call — ideal for triage workflows. Verified. | 1 Z2 + 1 Z1 per 50 articles |
+| `manage_tags` | Mark read/unread/starred, apply/remove tags (batch support), verified | 1 Z2 + 1 Z1 per 50, up to 2 rounds |
+| `batch_manage_tags` | Grouped tag edits with read-back verification | 1 Z2 per 50 sharing an add/remove pair + 1 Z1 per 50 intents, up to 2 rounds |
 | `mark_all_read` | Mark all items in a feed/folder as read | 1 Z2 |
-| `list_folders_and_tags` | All folders and tags with unread counts (unread only; use `get_article_ids` for totals) | 1 Z1 |
+| `list_folders_and_tags` | All folders and tags with unread counts (unread only; use `get_article_ids` for paged counts) | 2 Z1 |
 
 #### Account
 
@@ -145,8 +155,8 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 |------|-------------|----------|
 | `get_uncategorized_feeds` | Feeds with no folder, as compact tuples | 1 Z1 |
 | `suggest_feed_cleanup` | Deterministic cleaned-up title proposals for uncategorized feeds — strips vendor boilerplate (`Blog on X`, `X's Blog`, trailing `RSS`/`Feed`, redundant site suffix). Read-only; apply with `manage_subscription`. | 1 Z1 |
-| `categorize_feeds` | Bulk-assign feeds to folders from a `{folder: [id, ...]}` map. Verified. | 1 Z2/feed + 2 Z1 |
-| `reassign_feeds` | Move feeds between folders in bulk. Verified — a feed counts as moved only when it is in the destination *and* out of the source. | 1 Z2/feed + 2 Z1 |
+| `categorize_feeds` | Verified bulk folder assignment from `{folder: [id, ...]}` | 1 Z2/assignment + 1-3 Z1; reconciliation adds up to 1 Z2/shortfall |
+| `reassign_feeds` | Verified moves require destination present AND source absent | 1 Z2/assignment + 1-3 Z1; reconciliation adds up to 2 Z2/shortfall |
 | `find_feed_replacement` | For a broken feed: where the old address redirects, the feeds its site advertises, and conventional paths, each compared with the posts Inoreader stored from the old feed. `high` = shares posts or is the redirect target, `medium` = same site only. Read-only; refuses private network addresses. | 2 Z1 + site fetches |
 | `replace_feed` | Swap a subscription to a new feed URL keeping its title and folders; the old one is removed only after the new one is confirmed. | 2-3 Z2 + 3 Z1 |
 | `analyze_feeds` | Bayesian feed health analysis with category-level priors. Degrades and reports rather than exhausting the read budget. | 3 + pages [+ 1 Z1/feed for volume] |
@@ -155,24 +165,35 @@ Higher-level workflows that combine multiple API calls or add client-side logic.
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `get_saved_items` | Union of starred articles + saved web pages + Keep-tagged items in one call. Deduplicates and adds `saved_via` field. Use instead of 3+ separate calls. | 3 Z1 |
+| `get_saved_items` | Bounded, deduplicated union with `saved_via`, `complete`, per-collection continuation/errors | Up to 3 × `max_pages_per_collection` Z1 (default 1, max 10) |
 | `get_saved_web_pages` | List saved pages with `removable` filter (excludes starred and `keep`-tagged). Supports `compact=true`. | 1 Z1/page |
-| `remove_saved_web_pages` | Batch-remove saved pages by ID. Verified. | 1 Z2 + 1 Z1 per 50 |
+| `remove_saved_web_pages` | Batch-remove saved pages by ID. Verified. | 1 Z2 + 1 Z1 per 50, up to 2 rounds |
 
 #### Classifier calibration
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `extract_classifier_data` | Pull Inoreader Intelligence summaries for verified-tagged articles, parse RECOMMENDATION + CONFIDENCE. Optional population scan for the score distribution. | ~4-8 Z1 (+population) |
+| `extract_classifier_data` | Read existing Intelligence summaries; cap flags disclose partial coverage, errors fail loudly | 4-80 Z1 + optional population pages (default 30, max 200) |
 | `analyze_classifier_calibration` | Reliability diagram, ECE, monotonicity violations, threshold diagnostic, Manski FNR bounds, audit-conditional recall posterior | same as extract |
 | `recommend_audit_articles` | Active-learning suggestions for which recommend-skip articles to audit | same as extract |
 
-Starred articles, saved web pages, and Keep-tagged items are disjoint collections in the Inoreader API. `get_saved_items` fetches all three and deduplicates them. Each item includes a `saved_via` array (`["starred"]`, `["saved_web_page", "keep"]`, etc.) showing which collections it belongs to.
+Starred articles, saved web pages, and Keep-tagged items are separate, overlapping streams.
+`get_saved_items` reads at most 100 items per page per collection; `total_count`,
+`by_collection` and `saved_via` describe the fetched pages, not the whole account
+unless `complete=true`. Resume individual streams with `get_articles` and the reported
+continuation; membership may be incomplete while pages remain. `count_only` in
+`get_saved_web_pages` counts one IDs page of at most 10000, with `total_is_exact`
+and continuation, not an unconditional account total.
 
 The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup without starring it. Use `get_saved_web_pages(filter='removable')` for pages that are neither starred nor kept.
 
-**Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Call `get_rate_limit_status` for the live
-per-zone limit and usage rather than assuming a number.
+**Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Costs above are base requests;
+safe-read retries are additional attempts. Read `inoreader://usage` and
+`get_rate_limit_status` before expensive work. All 29 tools explicitly declare all
+four safety hints; these are advisory, not authorization or approval enforcement.
+JSON text results are preserved alongside structured data (legacy top-level arrays
+appear under `structuredContent.items`). Output schemas are declared and validated
+for stable ID/saved-union/folder-write shapes.
 
 ## Prompts
 
@@ -221,7 +242,10 @@ When you finish reading an article, apply one of these tags via `manage_tags` (f
 
 ### 3. Run the analysis
 
-Call the `analyze-classifier` prompt periodically (or once verified counts pass ~30). It runs `extract_classifier_data`, then `analyze_classifier_calibration`, and walks you through the reliability diagram, ECE, monotonicity violations, and threshold diagnostic.
+Call the `analyze-classifier` prompt periodically (or once verified counts pass ~30).
+It runs `analyze_classifier_calibration` once, checks `data_summary` for sufficient
+labels and cap flags, then reviews the reliability diagram and diagnostics. It does
+not repeat the same extraction merely to inventory labels.
 
 ### 4. Optionally audit
 
@@ -247,7 +271,9 @@ shortfall at all. Inoreader also returns `200 "OK"` for an edit to a feed that d
 exist, so no amount of inspecting the request or its response can establish what
 happened. Only reading the state back can.
 
-So the bulk tools apply, wait, re-read, retry the shortfall once, and report:
+So the bulk tools preflight known worst-case write/verification costs, apply, wait,
+re-read, reconcile observed shortfalls once, and report. Missing articles/feeds or
+failed verification are unknown, not permission to replay an ambiguous write:
 
 | Field | Meaning |
 |---|---|
@@ -265,8 +291,34 @@ scarce. Article tags cost one read per 50.
 
 ## Rate Limits
 
-Every tool description includes its API cost so Claude can budget calls. `get_rate_limit_status` reports live usage without making an API request, reading state
-persisted under `~/.config/inoreader-mcp/rate-limit.json` by earlier calls.
+Tool descriptions and the static guide include API costs. `get_rate_limit_status`
+and `inoreader://rate-limits` make **zero HTTP requests or auth probes**, reading
+persisted observations under `~/.config/inoreader-mcp/rate-limit.json`.
+
+Every API fetch attempt, including retries and transport failures, is counted; every
+response's quota headers are ingested, including 429/5xx. Usage/limit observations
+are timestamped per zone. Raw headers are distinct from conservative admission
+estimates for later local attempts or out-of-order responses. Reset/cooldown times
+are absolute and countdowns age. Missing/expired usage is **unknown**, not free calls;
+legacy snapshots without field-level provenance do not authorize quota estimates.
+Other clients/processes may consume unseen quota. Persistence is best-effort telemetry,
+not a cross-process lock; admission and the shared four-operation HTTP concurrency
+cap apply within one process (including public-site discovery and OAuth).
+
+Safe reads alone retry up to four attempts, with jitter and Retry-After; delays over
+60 seconds fail with a persisted cooldown instead of sleeping indefinitely. Writes
+are never blindly replayed after transport loss, 5xx or unexpected bodies. OAuth
+requests and public-site fetches are separate from Zone 1/2 API counts.
+
+Expensive workflows preflight known headroom and recheck admission on each attempt.
+`analyze_feeds` defaults to at most 100 base calls across tags/volume (`max_requests`
+up to 500); it and classifier scans leave 25 known requests in reserve. Classifier
+scans preflight the maximum page budget. Unknown quota still permits bounded work.
+Preflight is not a reservation: other calls can consume budget before a workflow
+finishes. Partial results/cap/degraded/error flags must not be treated as full coverage.
+
+Offline checks (no account calls): `npm test`, `npm run typecheck`, `npm run build`.
+CI and the release image job require these checks.
 
 Do not hardcode a daily limit. This README claimed ~100/zone/day for a long time; the
 account it was developed against actually reports 2000. Ask the tool.

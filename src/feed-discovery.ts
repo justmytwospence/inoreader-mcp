@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { withHttpSlot } from "./concurrency.js";
 
 /**
  * Finding where a broken feed went.
@@ -219,6 +220,7 @@ const UA = "Mozilla/5.0 (compatible; inoreader-mcp feed repair; +https://github.
 
 /** GET with redirects followed by hand, so every hop is checked against assertPublicUrl. */
 export async function fetchPublic(url: string, timeoutMs = 15000, maxBytes = 2_000_000): Promise<FetchResult> {
+  return withHttpSlot(async () => {
   let current = url;
   try {
     for (let hop = 0; hop <= 5; hop++) {
@@ -230,10 +232,26 @@ export async function fetchPublic(url: string, timeoutMs = 15000, maxBytes = 2_0
       });
       const loc = res.headers.get("location");
       if (res.status >= 300 && res.status < 400 && loc) {
+        await res.body?.cancel();
         current = new URL(loc, current).toString();
         continue;
       }
-      const body = (await res.text()).slice(0, maxBytes);
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let body = "";
+      let bytes = 0;
+      try {
+        while (reader && bytes < maxBytes) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const take = value.subarray(0, maxBytes - bytes);
+          bytes += take.length;
+          body += decoder.decode(take, { stream: true });
+        }
+        body += decoder.decode();
+      } finally {
+        await reader?.cancel();
+      }
       return { ok: res.ok, status: res.status, finalUrl: current, body };
     }
     return { ok: false, status: null, finalUrl: current, body: "", error: "too many redirects" };
@@ -241,4 +259,5 @@ export async function fetchPublic(url: string, timeoutMs = 15000, maxBytes = 2_0
     const err = e as { cause?: { code?: string }; message?: string };
     return { ok: false, status: null, finalUrl: current, body: "", error: err.cause?.code ?? err.message ?? String(e) };
   }
+  });
 }

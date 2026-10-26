@@ -10,6 +10,7 @@ import { registerCalibrationTools } from "./tools/calibration.js";
 import { registerRepairTools } from "./tools/repair.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
+import { SERVER_INSTRUCTIONS } from "./guidance.js";
 
 export const SERVER_NAME = "inoreader-mcp";
 export const VERSION: string = createRequire(import.meta.url)("../package.json").version;
@@ -18,8 +19,10 @@ function registerSetupAuth(server: McpServer): void {
   server.registerTool(
     "setup_auth",
     {
+      title: "Set up Inoreader authentication",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       description:
-        "Authenticate with Inoreader via OAuth 2.0. If no code is provided, returns the authorization URL to visit. If a code is provided, exchanges it for access tokens.",
+        "Authenticate with Inoreader via OAuth 2.0. If no code is provided, returns the authorization URL to visit. If a code is provided, exchanges it once for access tokens (overwrites locally saved credentials; OAuth requests are separate from Zone 1/2 accounting). A consumed code must not be replayed. Read inoreader://usage for workflow and budget guidance.",
       inputSchema: z.object({
         code: z
           .string()
@@ -75,7 +78,7 @@ function registerSetupAuth(server: McpServer): void {
  * limiter live at module scope; API responses are never cached.
  */
 export function createServer(): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: VERSION });
+  const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
   registerSetupAuth(server);
   registerReadingTools(server);
   registerSubscriptionTools(server);

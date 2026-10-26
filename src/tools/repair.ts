@@ -51,6 +51,7 @@ export function registerRepairTools(server: McpServer): void {
   server.registerTool(
     "find_feed_replacement",
     {
+      annotations: { readOnlyHint: true },
       description:
         "Find a working feed for a subscription whose feed address is broken. Checks where the old address redirects, the feeds the site advertises (<link rel=alternate>), and conventional feed paths, then compares each candidate with the posts Inoreader stored from the old feed. confidence 'high' means the candidate carries posts from the old feed or the old address redirects to it; 'medium' means same site but no shared posts; 'low' is anything else. `recommended` is the best high-confidence candidate, or null. Makes NO changes -- apply one with replace_feed. Costs 2 Zone 1 requests, plus up to ~30 fetches of the site itself (not Inoreader).",
       inputSchema: z.object({

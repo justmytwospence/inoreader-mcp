@@ -154,7 +154,7 @@ export function registerOrganizationTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("list_folders_and_tags", { description: "List all folders, tags, and labels with their unread counts. Note: only unread_count is available here; total_count (including read items) requires a separate get_article_ids call per tag. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
+  server.registerTool("list_folders_and_tags", { annotations: { readOnlyHint: true }, description: "List all folders, tags, and labels with their unread counts. Note: only unread_count is available here; total_count (including read items) requires a separate get_article_ids call per tag. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
               const [tags, unreadData] = await Promise.all([
                 apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json" }),
                 apiGet<UnreadCountResponse>("/reader/api/0/unread-count", {

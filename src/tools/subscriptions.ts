@@ -120,7 +120,7 @@ export function registerSubscriptionTools(server: McpServer): void {
               return renderFolderWriteResult(report);
             });
 
-  server.registerTool("list_subscriptions", { description: "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("list_subscriptions", { annotations: { readOnlyHint: true }, description: "List RSS feed subscriptions with their folders, URLs, and metadata. Supports filtering by folder and searching by title/URL. Returns paginated results (default 100). Costs 1 Zone 1 request.", inputSchema: z.object({
               folder: z
                 .string()
                 .optional()
@@ -194,7 +194,7 @@ export function registerSubscriptionTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("suggest_feed_cleanup", { description: "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("suggest_feed_cleanup", { annotations: { readOnlyHint: true }, description: "Propose cleaned-up titles for feeds that have no folder assignment. Pure string normalization -- strips vendor boilerplate (\"Blog on X\", \"X's Blog\", trailing \"RSS\"/\"Feed\", and a trailing site-name suffix). Deterministic: no LLM judgment, same input always yields the same output. Makes NO changes -- apply a proposal with manage_subscription action='edit'. Costs 1 Zone 1 request.", inputSchema: z.object({
               include_unchanged: z
                 .boolean()
                 .optional()
@@ -242,7 +242,7 @@ export function registerSubscriptionTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_uncategorized_feeds", { description: "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("get_uncategorized_feeds", { annotations: { readOnlyHint: true }, description: "Get feeds that have no folder assignment, returned as compact [stream_id, title] tuples. Use this to identify feeds needing categorization, then call categorize_feeds with your assignments. Costs 1 Zone 1 request.", inputSchema: z.object({
               include_url: z
                 .boolean()
                 .optional()

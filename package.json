@@ -1,6 +1,6 @@
 {
   "name": "inoreader-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server for the Inoreader RSS reader API. Analyze feed health, triage articles, and manage subscriptions from Claude.",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc --outDir .dist-new && rm -rf .dist-old && mv dist .dist-old 2>/dev/null; mv .dist-new dist && rm -rf .dist-old",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test \".test-build/test/*.test.js\"",
+    "test": "tsc -p tsconfig.test.json && cp package.json .test-build/package.json && node --test \".test-build/test/*.test.js\"",
     "start:http": "MCP_TRANSPORT=http node dist/index.js"
   },
   "keywords": [

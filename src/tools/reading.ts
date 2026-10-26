@@ -58,7 +58,7 @@ function formatArticleCompact(item: ArticleItem) {
 }
 
 export function registerReadingTools(server: McpServer): void {
-  server.registerTool("get_unread_counts", { description: "Get unread article counts for all feeds and folders, sorted by count descending. Use this first to understand what needs attention. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
+  server.registerTool("get_unread_counts", { annotations: { readOnlyHint: true }, description: "Get unread article counts for all feeds and folders, sorted by count descending. Use this first to understand what needs attention. Costs 1 Zone 1 request.", inputSchema: z.object({}) }, async () => {
               const data = await apiGet<UnreadCountResponse>(
                 "/reader/api/0/unread-count",
                 { output: "json" }
@@ -85,7 +85,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_articles", { description: "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page plus 1 for total_count (disable with include_total=false).", inputSchema: z.object({
+  server.registerTool("get_articles", { annotations: { readOnlyHint: true }, description: "Fetch articles from a feed, folder, tag, or all items. Supports filtering by read/unread/starred status and date range. Costs 1 Zone 1 request per page plus 1 for total_count (disable with include_total=false).", inputSchema: z.object({
               stream_id: z
                 .string()
                 .optional()
@@ -180,7 +180,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_article_ids", { description: "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. For a middle ground with titles, use get_articles with compact=true instead. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("get_article_ids", { annotations: { readOnlyHint: true }, description: "Lightweight fetch of article IDs from a stream without full content. Useful for counting or batch operations. For a middle ground with titles, use get_articles with compact=true instead. Costs 1 Zone 1 request.", inputSchema: z.object({
               stream_id: z
                 .string()
                 .optional()
@@ -245,7 +245,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("search_articles", { description: "Search for articles by keyword across all feeds. Costs 1 Zone 1 request per page. Uses undocumented but stable search endpoint.", inputSchema: z.object({
+  server.registerTool("search_articles", { annotations: { readOnlyHint: true }, description: "Search for articles by keyword across all feeds. Costs 1 Zone 1 request per page. Uses undocumented but stable search endpoint.", inputSchema: z.object({
               query: z.string().describe("Search query string"),
               count: z
                 .number()
@@ -302,7 +302,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_saved_web_pages", { description: "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Both count_only and listing apply the filter server-side via the Inoreader API. Set count_only=true to get just the filtered total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.", inputSchema: z.object({
+  server.registerTool("get_saved_web_pages", { annotations: { readOnlyHint: true }, description: "List saved web pages (manually saved URLs, not from RSS feeds). Supports filtering to find cleanup candidates. Pages can be protected from cleanup by starring or tagging with 'Keep' (via manage_tags add_tag='Keep'). Use filter 'removable' to find pages that are neither starred nor kept -- these are safe cleanup candidates. Both count_only and listing apply the filter server-side via the Inoreader API. Set count_only=true to get just the filtered total without fetching content (1 Z1 request). Costs 1 Z1 request per page otherwise.", inputSchema: z.object({
               filter: z
                 .enum(["all", "starred", "unstarred", "removable"])
                 .optional()
@@ -386,7 +386,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_saved_items", { description: "Get all saved items in one call: union of starred articles, saved web pages, and Keep-tagged items. Deduplicates across collections and adds a saved_via field showing which collections each item belongs to. Use instead of making 3+ separate calls to piece together what the user sees as 'Saved'. Costs 3 Zone 1 requests.", inputSchema: z.object({
+  server.registerTool("get_saved_items", { annotations: { readOnlyHint: true }, description: "Get all saved items in one call: union of starred articles, saved web pages, and Keep-tagged items. Deduplicates across collections and adds a saved_via field showing which collections each item belongs to. Use instead of making 3+ separate calls to piece together what the user sees as 'Saved'. Costs 3 Zone 1 requests.", inputSchema: z.object({
               compact: z
                 .boolean()
                 .optional()
@@ -485,7 +485,7 @@ export function registerReadingTools(server: McpServer): void {
               };
             });
 
-  server.registerTool("get_article_content", { description: "Get full HTML content for specific articles by ID. Use after get_articles or search_articles to read full content. Costs 1 Zone 1 request.", inputSchema: z.object({
+  server.registerTool("get_article_content", { annotations: { readOnlyHint: true }, description: "Get full HTML content for specific articles by ID. Use after get_articles or search_articles to read full content. Costs 1 Zone 1 request.", inputSchema: z.object({
               article_ids: z
                 .array(z.string())
                 .min(1)

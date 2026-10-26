@@ -1,0 +1,109 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+
+const dir = mkdtempSync(join(tmpdir(), "inoreader-annotations-"));
+writeFileSync(join(dir, "tokens.json"), JSON.stringify({
+  access_token: "test", refresh_token: "test", expires_at: Date.now() + 3_600_000,
+}));
+process.env.INOREADER_CONFIG_DIR = dir;
+const { createServer } = await import("../src/server.js");
+after(() => rmSync(dir, { recursive: true, force: true }));
+
+const reads = [
+  "get_unread_counts", "get_articles", "get_article_ids", "search_articles",
+  "get_saved_web_pages", "get_saved_items", "get_article_content",
+  "list_subscriptions", "suggest_feed_cleanup", "get_uncategorized_feeds",
+  "list_folders_and_tags", "analyze_feeds", "get_rate_limit_status", "get_user_info",
+  "extract_classifier_data", "analyze_classifier_calibration", "recommend_audit_articles",
+  "find_feed_replacement",
+];
+const writes = [
+  "setup_auth", "batch_edit_subscriptions", "categorize_feeds", "reassign_feeds",
+  "rename_folder", "manage_subscription", "manage_tags", "mark_all_read",
+  "remove_saved_web_pages", "batch_manage_tags", "replace_feed",
+];
+
+// Exercise the real wire protocol without adding a client dependency. The linked
+// in-memory endpoint sends requests to the SDK and captures its JSON-RPC replies.
+async function connect() {
+  const server = createServer();
+  type Transport = Parameters<typeof server.connect>[0];
+  const pending = new Map<number, (value: any) => void>();
+  const transport: Transport = {
+    async start() {},
+    async close() {},
+    async send(message) {
+      if ("id" in message && typeof message.id === "number") {
+        pending.get(message.id)?.(message);
+        pending.delete(message.id);
+      }
+    },
+  };
+  await server.connect(transport);
+  let id = 0;
+  const request = (method: string, params: Record<string, unknown> = {}) => new Promise<any>((resolve, reject) => {
+    const current = ++id;
+    const timer = setTimeout(() => reject(new Error(`timeout: ${method}`)), 5000);
+    pending.set(current, (response) => {
+      clearTimeout(timer);
+      if (response.error) reject(new Error(JSON.stringify(response.error)));
+      else resolve(response.result);
+    });
+    transport.onmessage?.({ jsonrpc: "2.0", id: current, method, params });
+  });
+  await request("initialize", {
+    protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" },
+  });
+  transport.onmessage?.({ jsonrpc: "2.0", method: "notifications/initialized" });
+  return { server, request };
+}
+
+test("tools/list exposes the complete audited read/write inventory", async () => {
+  const { server, request } = await connect();
+  try {
+    const { tools } = await request("tools/list");
+    assert.deepEqual(tools.map((t: any) => t.name).sort(), [...reads, ...writes].sort());
+    for (const tool of tools) {
+      if (reads.includes(tool.name)) assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
+      else assert.notEqual(tool.annotations?.readOnlyHint, true, tool.name);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("representative reads only use read endpoints, including the content POST", async () => {
+  const original = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push(`${method} ${url.pathname}`);
+    const bodies: Record<string, unknown> = {
+      "GET /reader/api/0/subscription/list": { subscriptions: [] },
+      "GET /reader/api/0/stream/contents/user%2F-%2Fstate%2Fcom.google%2Freading-list": { items: [] },
+      "POST /reader/api/0/stream/items/contents": { items: [] },
+    };
+    const key = calls.at(-1)!;
+    assert.ok(key in bodies, `unexpected endpoint (possible mutation): ${key}`);
+    return new Response(JSON.stringify(bodies[key]), { headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const { server, request } = await connect();
+  try {
+    for (const [name, args] of [
+      ["list_subscriptions", {}],
+      ["get_articles", { include_total: false }],
+      ["get_article_content", { article_ids: ["123"] }],
+    ] as const) {
+      const result = await request("tools/call", { name, arguments: args });
+      assert.notEqual(result.isError, true, JSON.stringify(result));
+    }
+    assert.equal(calls.length, 3);
+  } finally {
+    globalThis.fetch = original;
+    await server.close();
+  }
+});

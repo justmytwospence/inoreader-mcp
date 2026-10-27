@@ -325,4 +325,4 @@ account it was developed against actually reports 2000. Ask the tool.
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).

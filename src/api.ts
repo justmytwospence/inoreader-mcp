@@ -127,7 +127,7 @@ export async function apiPost<T>(
   path: string,
   body?: Record<string, string> | URLSearchParams,
   params?: Record<string, string>,
-  options?: { expectOk?: boolean }
+  options?: { expectOk?: boolean; reserve?: number }
 ): Promise<T> {
   const token = await ensureValidToken();
   const url = new URL(path, BASE_URL);
@@ -156,7 +156,7 @@ export async function apiPost<T>(
       },
       body: encodedBody,
     },
-    `POST ${path}`, ZONE1_POST_PATHS.has(path) ? 1 : 2
+    `POST ${path}`, ZONE1_POST_PATHS.has(path) ? 1 : 2, options?.reserve
   );
 
   if (!res.ok) {

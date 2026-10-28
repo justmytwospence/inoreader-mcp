@@ -16,8 +16,19 @@ services:
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
       # Token and rate-limit state; survives restarts so OAuth is a one-time step.
       INOREADER_CONFIG_DIR: /data
+      # Optional taste index (README: "Taste index"): set to "on" to enable its four tools.
+      # It lives in the same volume, under taste/, and is rebuilt from Inoreader if lost.
+      INOREADER_TASTE_INDEX: ${INOREADER_TASTE_INDEX:-}
+      # Optional: JSON file of sources and tiers (mount it below). Unset = starred + highlights.
+      INOREADER_TASTE_CONFIG: ${INOREADER_TASTE_CONFIG:-}
+      # Optional: for a "karakeep" source, the variables its url_env / key_env name.
+      KARAKEEP_API_URL: ${KARAKEEP_API_URL:-}
+      KARAKEEP_API_KEY: ${KARAKEEP_API_KEY:-}
     volumes:
       - inoreader-data:/data
+      # - ./taste.json:/config/taste.json:ro   # with INOREADER_TASTE_CONFIG=/config/taste.json
+    # With the taste index on, embedding peaks near 0.4 GB (0.65 GB for 512-token texts); 1g is a safe ceiling.
+    # mem_limit: 1g
     ports:
       - "8000:8000"
 

@@ -15,7 +15,7 @@ Go to the [Inoreader Developer Portal](https://www.inoreader.com/developers/) an
 
 This project is **not** published to npm. The name `inoreader-mcp` on the npm registry
 belongs to an unrelated project, so `npx inoreader-mcp` installs someone else's code.
-Build it from source instead:
+Build it from source instead (Node 24 or newer: the taste index uses `node:sqlite`):
 
 ```bash
 git clone https://github.com/justmytwospence/inoreader-mcp
@@ -81,9 +81,121 @@ older session-based clients alike. Running as a service adds two things a stdio 
 | `MCP_TRANSPORT` | `stdio` (`http` in the image) | `stdio` or `http` |
 | `PORT` | `8000` | HTTP port |
 | `MCP_ALLOWED_HOSTS` | (any) | Comma-separated hostnames allowed in the `Host` header (set it behind a reverse proxy) |
+| `INOREADER_TASTE_INDEX` | (off) | `on` enables the [taste index](#taste-index) and its four tools |
+| `INOREADER_TASTE_CONFIG` | (built-in: starred + highlights) | Path of the JSON file naming the index's sources and tiers |
+| `INOREADER_TASTE_MODEL_DIR` | (download on first use; `/app/models` in the image) | Directory holding the embedding model files, so nothing is downloaded |
+| `INOREADER_TASTE_THREADS` | `1` | ONNX threads for the embedding model |
+| the variables a Karakeep source names | (unset) | Its base URL and API key; the config file holds only their names |
 
 Images: `ghcr.io/justmytwospence/inoreader-mcp`, published for amd64 and arm64 by pushing a
 `vX.Y.Z` tag.
+
+## Taste index
+
+An optional, local index of what you saved and valued, so a drafting tool can show exemplars of
+form and warn when an idea repeats something already saved. It is **not** a score of whether
+something is worth writing: similarity measures overlap, not quality.
+
+It is off unless `INOREADER_TASTE_INDEX=on`, and then adds four tools (33 instead of 29). Stdio
+users who do not set it are unaffected: the model and `node:sqlite` are never loaded.
+
+**What gets indexed is configuration, not code.** `INOREADER_TASTE_CONFIG` names a JSON file of
+*sources* and ordered *tiers*; nothing about your tags, labels or services is built in. Without a
+file the index covers what every account has, starred items and highlighted (annotated) items.
+An example file, for an account that saves to an `Archive` label, marks the best with `Clip`, and
+also keeps Karakeep bookmarks:
+
+```json
+{
+  "sources": [
+    {"name": "archive", "type": "inoreader-stream", "stream": "user/-/label/Archive"},
+    {"name": "clip", "type": "inoreader-stream", "stream": "user/-/label/Clip"},
+    {"name": "highlights", "type": "inoreader-annotations"},
+    {"name": "karakeep", "type": "karakeep", "url_env": "KARAKEEP_API_URL", "key_env": "KARAKEEP_API_KEY", "min_words": 300}
+  ],
+  "tiers": [
+    {"name": "clip", "sources": ["clip"]},
+    {"name": "good", "sources": ["clip", "highlights", "karakeep"]},
+    {"name": "archive", "sources": ["*"]}
+  ],
+  "default_tier": "good",
+  "novelty_threshold": 0.75
+}
+```
+
+- **Sources.** `inoreader-stream`: any stream ID (a label, a folder, starred, saved web pages).
+  `inoreader-annotations`: the annotated stream, keeping each highlight and note. `karakeep`: your
+  [Karakeep](https://karakeep.app) bookmarks, for pages saved outside Inoreader (see below). Names
+  are 1-32 characters of letters, digits, `_` and `-`.
+- **Tiers** are ordered narrowest first and list source names; `*` means all of them. An item is in a
+  tier when any of its sources is listed. `default_tier` defaults to the last (widest) tier and
+  `novelty_threshold` to 0.75. The file is validated at start: an unknown source in a tier, a
+  duplicate name or an unknown `default_tier` stops the server with a message naming the problem.
+  The built-in default has sources `starred` and `highlights`, tiers `highlights` then `saved` (`*`),
+  default tier `saved`.
+- **Items** are keyed by normalized URL (https, no `www.`, no fragment, trailing slash or `/amp`, no
+  tracking parameters), so the same page saved through different routes is one row carrying several
+  signals, one per source it belongs to. An item is deleted once its last signal is gone.
+- **Text** comes from the stored feed HTML Inoreader already returns (no paid full-text extraction is
+  ever started). One vector per item is embedded from `title + opening` (~1,200 characters). Items in
+  any tier but the widest also keep their cleaned text (capped at 20k characters) for longer excerpts.
+  A teaser-only feed item falls back to Karakeep's crawl when the URLs match.
+- **Why Karakeep needs its own source.** Inoreader's API reports an item's state only through its
+  categories (read, starred, labels, annotated, ...). Sending an article to Instapaper, Pocket or
+  Karakeep leaves nothing the API can read, and most Karakeep saves never pass through Inoreader.
+  Such signals can only come from the destination's own API. If you want a send counted without one,
+  also tag the item in Inoreader and list that label as an `inoreader-stream` source.
+- **Karakeep source.** `url_env` and `key_env` name the environment variables holding the base URL
+  and an API key; the file itself holds no secrets. Only link bookmarks count. Karakeep's own
+  reader-view classifier decides whether a page is an article (`not_readable` is skipped, `readable`
+  kept); where it gives no definite answer (`uncertain`, `unavailable`, not yet classified) the page
+  needs at least `min_words` words (default 300). `"use_reader_view": false` makes the word count
+  the only test. Checked against Karakeep 0.34.1.
+
+**How it runs.** Vectors are 384-dimensional (`Xenova/bge-small-en-v1.5`, 8-bit quantized) in a
+SQLite file at `<INOREADER_CONFIG_DIR>/taste/index.sqlite`, searched exactly in memory (a few
+milliseconds for thousands of items). The model runs in a worker thread, loads on first use and
+exits after 10 idle minutes, so steady state stays small. The index is rebuildable: a changed
+model/schema or a damaged file starts it over (a rebuild costs about 15 Zone 1 reads). Ideas and
+items are both embedded as passages, without BGE's query prefix.
+
+**Syncing.** In HTTP mode the 12-hour keepalive job refreshes the tokens and then syncs the index in
+the same tick; the first tick (60 seconds after start) is the backfill. A sync failure never
+affects the refresh or its ntfy alert: it is logged and shown by `taste_index_status`. In stdio mode
+there is no scheduler, only `sync_taste_index`. Disabling the keepalive (`INOREADER_KEEPALIVE_HOURS=0`)
+also disables the scheduled sync.
+
+A sync costs one Zone 1 read of stream membership per 10,000 members of each stream source (which also
+catches removals), one content read per 100 new items, and one annotations read per 100 highlighted
+items; Karakeep is local and costs no Inoreader reads. A first full build of two streams and an
+annotated stream is about 14 reads, an incremental sync 3 to 5. A sync keeps 25 reads in reserve
+(like `analyze_feeds`) and, if quota is short, does nothing and leaves the index unchanged. A failing
+source keeps its stored members and is reported; the others still apply. If the model cannot load,
+items are stored without vectors and the next sync embeds them.
+
+| Tool | Description | API Cost |
+|------|-------------|----------|
+| `similar_saved` | Saved items closest to a text, preferred tier first, then wider tiers: title, URL, source, dates, signals, tier, similarity, excerpt, headings, word count, highlights, plus index coverage. `prefer` is one of the configured tier names. | 0 |
+| `check_novelty` | `close` or `novel` for an idea against the nearest saved items in any tier, with their similarity. States that similarity is overlap, not quality. | 0 |
+| `taste_index_status` | Configured sources and tiers, counts by source and tier, last sync per source, Zone 1 reads per sync, errors, model, whether the index is complete. | 0 |
+| `sync_taste_index` | Run a sync now; returns the reads used. | about 3-5 Z1 (about 14 for the first) |
+
+While the index is still building, `similar_saved` and `check_novelty` report coverage (sources
+synced, items indexed) so an empty answer is not mistaken for a real one.
+
+In the image, set `INOREADER_TASTE_INDEX=on` and, for a config file, mount it and point
+`INOREADER_TASTE_CONFIG` at it. The model files are in the image (`/app/models`, pinned and
+checksummed), and the index lives in the `/data` volume under `taste/`. The image is about 390 MB.
+
+Resources, measured in the image (`docker run --rm --memory 1g --entrypoint node <image>
+dist/taste/bench.js` embeds 1,500 synthetic items of 1,200 characters and prints peak RSS and
+timing): peak RSS about 420 MB while embedding items of that size (about 300 tokens), about 650 MB
+for texts that fill the model's 512 tokens, 0.16 s per item on one thread (a first build of
+~1,300 items takes about 3 to 4 minutes, in a worker thread, so the server stays responsive).
+After 10 idle minutes the worker exits and most of that memory is returned: the bench process falls
+from its 420 MB peak to between 115 and 165 MB, against a baseline of 45 to 80 MB (the rest is
+allocator slack, which `MALLOC_TRIM_THRESHOLD_` in the image keeps small). A 1 GB memory limit is a comfortable ceiling; one CPU and `INOREADER_TASTE_THREADS=1`
+are enough.
 
 ## Resources
 
@@ -189,7 +301,7 @@ The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup w
 
 **Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Costs above are base requests;
 safe-read retries are additional attempts. Read `inoreader://usage` and
-`get_rate_limit_status` before expensive work. All 29 tools explicitly declare all
+`get_rate_limit_status` before expensive work. All 29 tools (33 with the taste index on) explicitly declare all
 four safety hints; these are advisory, not authorization or approval enforcement.
 JSON text results are preserved alongside structured data (legacy top-level arrays
 appear under `structuredContent.items`). Output schemas are declared and validated
@@ -318,7 +430,10 @@ Preflight is not a reservation: other calls can consume budget before a workflow
 finishes. Partial results/cap/degraded/error flags must not be treated as full coverage.
 
 Offline checks (no account calls): `npm test`, `npm run typecheck`, `npm run build`.
-CI and the release image job require these checks.
+CI and the release image job require these checks. `INOREADER_MCP_MODEL_TESTS=1 npm test` also
+runs the real embedding model (set `INOREADER_TASTE_MODEL_DIR` to a local copy, else it is
+downloaded): it checks that a paraphrase of an essay's thesis scores at or above 0.75 against it
+and unrelated text below 0.6.
 
 Do not hardcode a daily limit. This README claimed ~100/zone/day for a long time; the
 account it was developed against actually reports 2000. Ask the tool.

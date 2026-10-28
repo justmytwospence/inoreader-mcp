@@ -13,6 +13,13 @@ Workflows
 - Organization: subscriptions/uncategorized costs 1 Z1; folders/tags costs 2. Bulk folder writes preflight worst-case reconciliation (2 Z2 per assignment, 3 for moves, plus 3 Z1); tag edits preflight 2 rounds of grouped 50-ID writes and verification reads. Preflight is not a reservation; partial results remain possible if other activity consumes quota.
 - Saved review: get_saved_web_pages count_only reads at most 10000 IDs on one page; it is an exact total only if there is no continuation and no input continuation. Do not auto-page an entire account: choose a bounded batch and ask before expanding. Keep/star protection is a review convention, not an enforced deletion guard.
 
+Taste index (tools exist only when the server runs with INOREADER_TASTE_INDEX=on)
+- Purpose: show what the user saved and valued, as exemplars of form, and warn when an idea repeats something already saved. It is not a score of whether something is worth writing: similarity measures overlap, not quality.
+- What it indexes is configuration, not code: sources (Inoreader streams such as a label, folder or starred; annotated items; optionally Karakeep bookmarks) grouped into ordered tiers, narrowest first. taste_index_status lists the configured sources and tiers, counts, errors and whether the index is complete; call it before relying on results.
+- similar_saved (0 requests): items from the preferred tier first, then wider tiers, each with title, URL, signals, similarity, excerpt, headings and highlights. check_novelty (0): close or novel against the nearest saved items in any tier. Both report coverage; while the index is still building, results cover only what is indexed so far.
+- Sync: the index updates itself every 12 hours after the token refresh (HTTP mode only). sync_taste_index runs one now: about 3-5 Zone 1 reads incrementally and about 14 for the first full build (one ids read per stream source, one content read per 100 new items, one annotations read per 100 highlighted items). It keeps 25 reads in reserve and does nothing, leaving the index unchanged, when quota is short.
+- Matching uses a local embedding model: the first search after 10 idle minutes reloads it and takes a few seconds. No text leaves the server.
+
 Discovery
 - Existing subscriptions/folders/unread resources are live metadata reads (bounded output; truncation is disclosed).
 - Article template: inoreader://articles/{percent-encoded article ID}/content?max_chars=8000. Examples: inoreader://articles/123/content?max_chars=8000 and inoreader://articles/tag%3Agoogle.com%2C2005%3Areader%2Fitem%2F00000000499602d2/content?max_chars=2000. One Zone 1 content POST, max 20000 returned HTML characters; no extraction or processing.

@@ -10,6 +10,8 @@ writeFileSync(join(dir, "tokens.json"), JSON.stringify({
 }));
 process.env.INOREADER_CONFIG_DIR = dir;
 const { connect } = await import("./wire.js");
+const { DEFAULT_CONFIG_INPUT, parseTasteConfig } = await import("../src/taste/config.js");
+const { TasteIndex, resetTasteIndex } = await import("../src/taste/index.js");
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const reads = [
@@ -80,6 +82,33 @@ test("representative reads only use read endpoints, including the content POST",
     assert.equal(calls.length, 3);
   } finally {
     globalThis.fetch = original;
+    await server.close();
+  }
+});
+
+test("the taste index tools exist only when enabled, and declare all four hints", async () => {
+  process.env.INOREADER_TASTE_INDEX = "on";
+  await resetTasteIndex(new TasteIndex({ config: parseTasteConfig(DEFAULT_CONFIG_INPUT), dataDir: "/nonexistent", dbPath: ":memory:", threads: 1 }));
+  const { server, request } = await connect();
+  try {
+    const { tools } = await request("tools/list");
+    const taste = tools.filter((t: any) => ["similar_saved", "check_novelty", "taste_index_status", "sync_taste_index"].includes(t.name));
+    assert.deepEqual(taste.map((t: any) => t.name).sort(), ["check_novelty", "similar_saved", "sync_taste_index", "taste_index_status"]);
+    assert.equal(tools.length, reads.length + writes.length + 4);
+    for (const t of taste) {
+      assert.deepEqual(t.annotations, {
+        readOnlyHint: t.name !== "sync_taste_index",
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: t.name === "sync_taste_index",
+      }, t.name);
+      assert.match(t.description, /inoreader:\/\/usage/);
+    }
+    // The default configuration's tiers are the choices for `prefer`.
+    assert.deepEqual(taste.find((t: any) => t.name === "similar_saved").inputSchema.properties.prefer.enum, ["highlights", "saved"]);
+  } finally {
+    delete process.env.INOREADER_TASTE_INDEX;
+    await resetTasteIndex();
     await server.close();
   }
 });

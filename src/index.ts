@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import { isAuthenticated } from "./auth.js";
 import { registerOAuthCallback, startKeepalive } from "./keepalive.js";
 import { createServer, SERVER_NAME, VERSION } from "./server.js";
+import { getTasteIndex } from "./taste/index.js";
 
 const missing = ["INOREADER_CLIENT_ID", "INOREADER_CLIENT_SECRET"].filter((v) => !process.env[v]);
 if (missing.length) {
@@ -19,6 +20,14 @@ if (missing.length) {
     `ERROR: missing required environment variable(s): ${missing.join(", ")}.\n` +
       "Register an app at https://www.inoreader.com/developers/register-app.",
   );
+  process.exit(1);
+}
+
+// An invalid taste configuration fails at start, with a clear message, not on first use.
+try {
+  getTasteIndex();
+} catch (e) {
+  console.error(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
   process.exit(1);
 }
 
@@ -51,6 +60,7 @@ if (transport === "stdio") {
   );
   const shutdown = async () => {
     await handler.close();
+    await getTasteIndex()?.close().catch(() => {});
     httpServer.close(() => process.exit(0));
   };
   process.on("SIGTERM", shutdown);

@@ -8,6 +8,7 @@ import { registerOrganizationTools } from "./tools/organization.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerCalibrationTools } from "./tools/calibration.js";
 import { registerRepairTools } from "./tools/repair.js";
+import { registerTasteTools } from "./tools/taste.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
 import { SERVER_INSTRUCTIONS } from "./guidance.js";
@@ -75,7 +76,7 @@ function registerSetupAuth(server: McpServer): void {
 /**
  * Builds a fully registered server. The HTTP transport calls this once per request,
  * stdio once per process, so keep it free of side effects and I/O. Tokens, the rate
- * limiter live at module scope; API responses are never cached.
+ * limiter and the taste index live at module scope; API responses are never cached.
  */
 export function createServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: VERSION }, { instructions: SERVER_INSTRUCTIONS });
@@ -86,6 +87,7 @@ export function createServer(): McpServer {
   registerAnalyticsTools(server);
   registerCalibrationTools(server);
   registerRepairTools(server);
+  registerTasteTools(server); // only when INOREADER_TASTE_INDEX=on
   registerResources(server);
   registerPrompts(server);
   return server;

@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import { exchangeCode, refreshStoredTokens } from "./auth.js";
+import { getTasteIndex } from "./taste/index.js";
 
 // HTTP-mode extras. A long-running server can do two things a stdio process spawned per
 // call never could: receive the OAuth redirect itself, and keep the grant alive.
@@ -76,8 +77,10 @@ export function startKeepalive(): void {
   const hours = Number(process.env.INOREADER_KEEPALIVE_HOURS ?? 12);
   if (!(hours > 0)) return;
   const tick = async () => {
+    let refreshed = false;
     try {
-      if (await refreshStoredTokens()) console.error("[inoreader-mcp] keepalive: refreshed tokens");
+      refreshed = await refreshStoredTokens();
+      if (refreshed) console.error("[inoreader-mcp] keepalive: refreshed tokens");
       else console.error("[inoreader-mcp] keepalive: not authenticated yet, skipping");
     } catch (e) {
       console.error("[inoreader-mcp] keepalive: refresh failed:", e);
@@ -86,9 +89,40 @@ export function startKeepalive(): void {
         `${e}\n\nRe-authorize with the setup_auth tool -- the server is unauthenticated until you do.`,
       );
     }
+    await tasteSync(refreshed);
   };
   setTimeout(() => {
     void tick();
     setInterval(tick, hours * 3_600_000);
   }, 60_000);
+}
+
+/**
+ * The taste index syncs on the same schedule, right after the refresh, so it always
+ * reads with a fresh token. It never affects the refresh or its alert: a failure is
+ * logged and left for taste_index_status to show. The first tick is the backfill.
+ */
+async function tasteSync(refreshed: boolean): Promise<void> {
+  let taste;
+  try {
+    taste = getTasteIndex();
+  } catch (e) {
+    console.error("[inoreader-mcp] taste: configuration invalid:", e);
+    return;
+  }
+  if (!taste) return;
+  try {
+    if (!refreshed) {
+      taste.noteSkipped("scheduled sync skipped: Inoreader token refresh did not succeed");
+      console.error("[inoreader-mcp] taste: scheduled sync skipped (no fresh token)");
+      return;
+    }
+    const r = await taste.sync();
+    console.error(
+      `[inoreader-mcp] taste: sync ${r.outcome}: ${r.items_total} items, ${r.items_added} added, ${r.items_removed} removed, ` +
+        `${r.embedded} embedded, ${r.z1_reads} Zone 1 reads${r.reason ? ` (${r.reason})` : ""}${r.errors.length ? `; errors: ${r.errors.join("; ")}` : ""}`,
+    );
+  } catch (e) {
+    console.error("[inoreader-mcp] taste: sync failed:", e);
+  }
 }

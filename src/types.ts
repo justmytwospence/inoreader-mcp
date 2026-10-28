@@ -40,6 +40,19 @@ export interface InoreaderIntelligenceSummary {
   is_mobilized?: number;
 }
 
+/** One highlight on an article, as `stream/contents?annotations=1` returns it. */
+export interface ArticleAnnotation {
+  id: number | string;
+  start?: number;
+  end?: number;
+  /** Unix seconds. */
+  added_on?: number;
+  /** The highlighted text. */
+  text?: string;
+  /** The user's note on the highlight, if any. */
+  note?: string;
+}
+
 export interface ArticleItem {
   id: string;
   crawlTimeMsec: string;
@@ -58,6 +71,8 @@ export interface ArticleItem {
   };
   categories: string[];
   author?: string;
+  /** Present only when requested with `annotations=1`. */
+  annotations?: ArticleAnnotation[];
 }
 
 export interface StreamContentsResponse {

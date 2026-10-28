@@ -92,9 +92,9 @@ Images: `ghcr.io/justmytwospence/inoreader-mcp`, published for amd64 and arm64 b
 
 ## Taste index
 
-An optional, local index of what you saved and valued, so a drafting tool can show exemplars of
-form and warn when an idea repeats something already saved. It is **not** a score of whether
-something is worth writing: similarity measures overlap, not quality.
+An optional, local semantic index of what you saved and valued: find saved items close to a piece
+of text, and check whether a text repeats something already saved. Similarity measures topical
+overlap, not quality: it is **not** a score of whether something is any good.
 
 It is off unless `INOREADER_TASTE_INDEX=on`, and then adds four tools (33 instead of 29). Stdio
 users who do not set it are unaffected: the model and `node:sqlite` are never loaded.

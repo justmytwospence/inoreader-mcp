@@ -215,7 +215,7 @@ export class TasteIndex {
     // Only the sources that count the item (a source's exclude_domains drops it there).
     const owners = this.loadSnapshot().owners.get(hit.key) ?? new Set<string>();
     const meta = this.loadSnapshot().meta.get(hit.key);
-    const added = signals.map((s) => s.added_at).filter((t): t is number => typeof t === "number");
+    const added = signals.filter((s) => owners.has(s.source)).map((s) => s.added_at).filter((t): t is number => typeof t === "number");
     const order = this.config.sources.map((s) => s.name).filter((n) => owners.has(n));
     return {
       title: item.title,
@@ -277,7 +277,7 @@ export class TasteIndex {
       filters: filter,
       nearest: top.map((h) => this.describe(h, 300, false)),
       note:
-        "Similarity measures topical overlap with what was saved, not the quality of the idea or whether it is worth writing. " +
+        "Similarity measures topical overlap with what was saved, not the quality of the idea. " +
         (top.length ? "" : "The index is empty, so nothing could be compared; 'novel' here means unknown. "),
       coverage: this.coverage(),
     };

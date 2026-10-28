@@ -42,7 +42,7 @@ export function registerTasteTools(server: McpServer): void {
       title: "Find similar saved articles",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
-        "Find what the user already saved that is closest in topic to a piece of text (a draft, a claim, an outline), as exemplars of form and substance. " +
+        "Find what the user already saved that is closest in topic to a piece of text (a claim, a paragraph, a draft, a question). " +
         `Matches are drawn from the preferred tier first, then widened to the other tiers to fill k. Tiers, narrowest first: ${tierList}. Default tier: ${config.default_tier}. ` +
         FILTER_DOC +
         "Set fill=false to return only the preferred tier. " +
@@ -69,7 +69,7 @@ export function registerTasteTools(server: McpServer): void {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
         "Warn when an idea repeats something already saved. Returns verdict 'close' when the nearest saved article (any tier) is at or above the threshold, else 'novel', with the nearest articles and their similarity. " +
-        `Default threshold ${config.novelty_threshold}. Similarity measures topical overlap, not the quality of the idea or whether it is worth writing; an idea on the same topic but a different point can score as high as a restatement, so read the nearest items' similarity rather than trusting the verdict alone. ` +
+        `Default threshold ${config.novelty_threshold}. Similarity measures topical overlap, not the quality of the idea; an idea on the same topic but a different point can score as high as a restatement, so read the nearest items' similarity rather than trusting the verdict alone. ` +
         FILTER_DOC +
         "Each nearest item has title, URL, domain, signals, tier, similarity, word count and an excerpt. " +
         "Costs 0 Inoreader requests (local index; the first call may load the embedding model). If the index is empty or still building, 'novel' may only mean unknown: check coverage. " +

@@ -8,7 +8,8 @@ import {
   type TasteSettings,
 } from "./config.js";
 import type { Embedder } from "./embed.js";
-import { excerptOf, nearest, round3, similar, tiersOf, type Hit, type Snapshot } from "./search.js";
+import { domainMatches, domainOf, normalizeDomain, proseStats } from "./prose.js";
+import { excerptOf, nearest, round3, similar, tiersOf, type Hit, type ItemFilter, type ItemMeta, type Snapshot } from "./search.js";
 import { TasteStore, type ItemRow } from "./store.js";
 import {
   META_LAST_SYNC,
@@ -31,15 +32,16 @@ export interface TasteDeps {
   reads?: () => number;
 }
 
-export interface SimilarArgs {
+export interface SimilarArgs extends ItemFilter {
   text: string;
   k?: number;
   prefer?: string;
   min_similarity?: number;
   excerpt_chars?: number;
+  fill?: boolean;
 }
 
-export interface NoveltyArgs {
+export interface NoveltyArgs extends ItemFilter {
   idea: string;
   threshold?: number;
   k?: number;
@@ -58,7 +60,7 @@ export class TasteIndex {
   readonly config: TasteConfig;
   private _store?: TasteStore;
   private _embedder?: Embedder;
-  private snapshot?: Snapshot;
+  private snapshot?: Snapshot & { excluded: Record<string, number> };
   private syncing?: Promise<SyncReport>;
 
   constructor(
@@ -132,13 +134,58 @@ export class TasteIndex {
     });
   }
 
-  private loadSnapshot(): Snapshot {
+  /**
+   * The vectors plus, per item, its metadata and the sources that count it. A
+   * source's exclude_domains is applied here, so a config change needs only a
+   * restart: nothing is re-read or re-embedded.
+   */
+  private loadSnapshot(): Snapshot & { excluded: Record<string, number> } {
     if (this.snapshot) return this.snapshot;
     const m = this.store.loadMatrix();
+    const meta = new Map<string, ItemMeta>();
+    for (const item of this.store.allItems()) {
+      meta.set(item.key, { domain: domainOf(item.url), words: item.words, ...proseStats(item.text ?? item.opening) });
+    }
+    const excludes = new Map(this.config.sources.map((s) => [s.name, s.exclude_domains ?? []]));
+    const excluded: Record<string, number> = Object.fromEntries(this.config.sources.filter((s) => s.exclude_domains?.length).map((s) => [s.name, 0]));
     const owners = new Map<string, Set<string>>();
-    for (const [key, signals] of this.store.signalsByKey()) owners.set(key, new Set(signals.map((s) => s.source)));
-    this.snapshot = { ...m, owners };
+    for (const [key, signals] of this.store.signalsByKey()) {
+      const domain = meta.get(key)?.domain ?? "";
+      const counted = new Set<string>();
+      for (const sig of signals) {
+        const ex = excludes.get(sig.source);
+        if (ex?.length && domainMatches(domain, ex)) excluded[sig.source]++;
+        else counted.add(sig.source);
+      }
+      if (counted.size) owners.set(key, counted);
+    }
+    this.snapshot = { ...m, owners, meta, excluded };
     return this.snapshot;
+  }
+
+  /** The filter part of a call's arguments, validated and normalized. */
+  private filterOf(args: ItemFilter): ItemFilter {
+    const domains = (list: string[] | undefined, name: string) =>
+      list?.map((d) => {
+        const n = normalizeDomain(d);
+        if (!n) throw new Error(`${name}: "${d}" is not a domain name (e.g. github.com)`);
+        return n;
+      });
+    const known = new Set(this.config.sources.map((s) => s.name));
+    const unknown = (args.sources ?? []).filter((s) => !known.has(s));
+    if (unknown.length) throw new Error(`Unknown source(s) ${unknown.join(", ")}. Configured sources: ${[...known].join(", ")}.`);
+    if (args.min_words !== undefined && args.max_words !== undefined && args.min_words > args.max_words) {
+      throw new Error("min_words is greater than max_words");
+    }
+    const f: ItemFilter = {
+      ...(args.min_words !== undefined ? { min_words: args.min_words } : {}),
+      ...(args.max_words !== undefined ? { max_words: args.max_words } : {}),
+      ...(args.include_domains?.length ? { include_domains: domains(args.include_domains, "include_domains") } : {}),
+      ...(args.exclude_domains?.length ? { exclude_domains: domains(args.exclude_domains, "exclude_domains") } : {}),
+      ...(args.sources?.length ? { sources: args.sources } : {}),
+      ...(args.min_prose_paragraphs !== undefined ? { min_prose_paragraphs: args.min_prose_paragraphs } : {}),
+    };
+    return f;
   }
 
   coverage() {
@@ -165,12 +212,15 @@ export class TasteIndex {
     const store = this.store;
     const item = store.getItem(hit.key) as ItemRow;
     const signals = store.signalsFor(hit.key);
-    const owners = new Set(signals.map((s) => s.source));
+    // Only the sources that count the item (a source's exclude_domains drops it there).
+    const owners = this.loadSnapshot().owners.get(hit.key) ?? new Set<string>();
+    const meta = this.loadSnapshot().meta.get(hit.key);
     const added = signals.map((s) => s.added_at).filter((t): t is number => typeof t === "number");
     const order = this.config.sources.map((s) => s.name).filter((n) => owners.has(n));
     return {
       title: item.title,
       url: item.url,
+      domain: meta?.domain ?? domainOf(item.url),
       source: item.source_title,
       published: iso(item.published),
       saved: iso(added.length ? Math.min(...added) : null),
@@ -178,12 +228,14 @@ export class TasteIndex {
       tier: hit.tier,
       tiers: hit.tiers,
       similarity: round3(hit.similarity),
+      words: item.words,
       excerpt: excerptOf(item.text ?? item.opening, excerptChars),
       ...(withHighlights
         ? {
+            prose_paragraphs: meta?.prose_paragraphs ?? 0,
+            prose_ratio: meta?.prose_ratio ?? 0,
             headings: item.headings,
-            words: item.words,
-            highlights: signals.flatMap((s) => s.highlights).map((h) => ({ text: h.text, note: h.note, added_on: iso(h.added_on) })),
+            highlights: signals.filter((s) => owners.has(s.source)).flatMap((s) => s.highlights).map((h) => ({ text: h.text, note: h.note, added_on: iso(h.added_on) })),
           }
         : {}),
     };
@@ -203,22 +255,26 @@ export class TasteIndex {
     }
     const minSimilarity = args.min_similarity ?? 0.55;
     const excerptChars = args.excerpt_chars ?? 800;
+    const fill = args.fill ?? true;
+    const filter = this.filterOf(args);
     const snap = this.loadSnapshot();
     const results = snap.keys.length
-      ? similar(snap, this.config, await this.embedOne(args.text), { prefer, k, minSimilarity }).map((h) => this.describe(h, excerptChars, true))
+      ? similar(snap, this.config, await this.embedOne(args.text), { prefer, k, minSimilarity, fill, filter }).map((h) => this.describe(h, excerptChars, true))
       : [];
-    return { prefer, min_similarity: minSimilarity, count: results.length, results, coverage: this.coverage() };
+    return { prefer, fill, min_similarity: minSimilarity, filters: filter, count: results.length, results, coverage: this.coverage() };
   }
 
   async novelty(args: NoveltyArgs) {
     const threshold = args.threshold ?? this.config.novelty_threshold;
     const k = args.k ?? 3;
+    const filter = this.filterOf(args);
     const snap = this.loadSnapshot();
-    const top = snap.keys.length ? nearest(snap, this.config, await this.embedOne(args.idea), k) : [];
+    const top = snap.keys.length ? nearest(snap, this.config, await this.embedOne(args.idea), k, filter) : [];
     const close = top.length > 0 && top[0].similarity >= threshold;
     return {
       verdict: close ? "close" : "novel",
       threshold,
+      filters: filter,
       nearest: top.map((h) => this.describe(h, 300, false)),
       note:
         "Similarity measures topical overlap with what was saved, not the quality of the idea or whether it is worth writing. " +
@@ -253,6 +309,7 @@ export class TasteIndex {
           name: s.name,
           type: s.type,
           ...(s.type === "inoreader-stream" ? { stream: s.stream } : {}),
+          ...(s.exclude_domains?.length ? { exclude_domains: s.exclude_domains } : {}),
           ...(s.type === "karakeep"
             ? {
                 url_env: s.url_env,
@@ -267,7 +324,15 @@ export class TasteIndex {
         default_tier: this.config.default_tier,
         novelty_threshold: this.config.novelty_threshold,
       },
-      counts: { items: store.itemCount(), vectors: store.vectorCount(), by_source: bySource, by_tier: byTier, ...(untiered ? { in_no_tier: untiered } : {}) },
+      counts: {
+        items: store.itemCount(),
+        vectors: store.vectorCount(),
+        by_source: bySource,
+        ...(Object.keys(snap.excluded).length ? { excluded_by_source: snap.excluded } : {}),
+        searchable: snap.owners.size,
+        by_tier: byTier,
+        ...(untiered ? { in_no_tier: untiered } : {}),
+      },
       sources: this.config.sources.map((s) => ({
         name: s.name,
         items: bySource[s.name] ?? 0,

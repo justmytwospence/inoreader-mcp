@@ -18,6 +18,23 @@ export function registerTasteTools(server: McpServer): void {
   const tierNames = config.tiers.map((t) => t.name);
   const tierList = config.tiers.map((t) => `${t.name} (${t.sources.join(", ")})`).join("; then ");
   const PreferTier = z.enum(tierNames as [string, ...string[]]);
+  const sourceNames = config.sources.map((s) => s.name);
+  const SourceName = z.enum(sourceNames as [string, ...string[]]);
+  const Domains = z.array(z.string().min(1).max(253)).max(200);
+  // Composable, generic result filters; every given one must pass. They describe the
+  // text and where it came from, not whether it is good.
+  const filterShape = {
+    min_words: z.number().int().min(0).optional().describe("Only items with at least this many words (whole stored text)"),
+    max_words: z.number().int().min(0).optional().describe("Only items with at most this many words"),
+    include_domains: Domains.optional().describe("Only items from these domains or their subdomains, e.g. [\"substack.com\"]"),
+    exclude_domains: Domains.optional().describe("Leave out items from these domains or their subdomains, e.g. [\"github.com\"]"),
+    sources: z.array(SourceName).min(1).optional().describe(`Only items held by at least one of these configured sources: ${sourceNames.join(", ")}`),
+    min_prose_paragraphs: z
+      .number().int().min(0).max(20).optional()
+      .describe("Only items whose opening (first ~1,200 characters) has at least this many prose paragraphs: 25+ words ending in sentence punctuation. A coarse article-vs-page filter (READMEs, product pages and lists mostly have 0-1)"),
+  };
+  const FILTER_DOC =
+    "Optional filters (all must pass): min_words/max_words, include_domains/exclude_domains (subdomains included), sources (configured source names), min_prose_paragraphs (article-like openings). ";
 
   server.registerTool(
     "similar_saved",
@@ -27,7 +44,9 @@ export function registerTasteTools(server: McpServer): void {
       description:
         "Find what the user already saved that is closest in topic to a piece of text (a draft, a claim, an outline), as exemplars of form and substance. " +
         `Matches are drawn from the preferred tier first, then widened to the other tiers to fill k. Tiers, narrowest first: ${tierList}. Default tier: ${config.default_tier}. ` +
-        "Each result has title, URL, source, published/saved dates, the signals (which collections hold it), tier, similarity (0-1, cosine of local embeddings), an excerpt (the opening, or more when stored), headings, word count and the user's highlights, plus index coverage. " +
+        FILTER_DOC +
+        "Set fill=false to return only the preferred tier. " +
+        "Each result has title, URL, domain, source, published/saved dates, the signals (which sources hold it), tier, similarity (0-1, cosine of local embeddings), word count, prose_paragraphs and prose_ratio of the opening, an excerpt (the opening, or more when stored), headings and the user's highlights, plus the filters applied and index coverage, so a client can filter or rank further itself. " +
         "Similarity is topical overlap, not quality. Costs 0 Inoreader requests: it searches the local index (the first call may load the embedding model). If the index is still building, coverage says so. " +
         POINTER,
       inputSchema: z.object({
@@ -36,6 +55,8 @@ export function registerTasteTools(server: McpServer): void {
         prefer: PreferTier.optional().describe(`Tier to draw from first (default ${config.default_tier}); wider tiers fill the rest`),
         min_similarity: z.number().min(0).max(1).optional().describe("Drop matches below this cosine similarity (default 0.55)"),
         excerpt_chars: z.number().int().min(100).max(4000).optional().describe("Excerpt length per result (100-4000, default 800)"),
+        fill: z.boolean().optional().describe("Fill k from wider tiers when the preferred tier has too few matches (default true)"),
+        ...filterShape,
       }),
     },
     async (params) => jsonResult(await taste.similar(params)),
@@ -48,13 +69,16 @@ export function registerTasteTools(server: McpServer): void {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
         "Warn when an idea repeats something already saved. Returns verdict 'close' when the nearest saved article (any tier) is at or above the threshold, else 'novel', with the nearest articles and their similarity. " +
-        `Default threshold ${config.novelty_threshold}. Similarity measures topical overlap, not the quality of the idea or whether it is worth writing. ` +
+        `Default threshold ${config.novelty_threshold}. Similarity measures topical overlap, not the quality of the idea or whether it is worth writing; an idea on the same topic but a different point can score as high as a restatement, so read the nearest items' similarity rather than trusting the verdict alone. ` +
+        FILTER_DOC +
+        "Each nearest item has title, URL, domain, signals, tier, similarity, word count and an excerpt. " +
         "Costs 0 Inoreader requests (local index; the first call may load the embedding model). If the index is empty or still building, 'novel' may only mean unknown: check coverage. " +
         POINTER,
       inputSchema: z.object({
         idea: z.string().min(1).max(20_000).describe("The idea or thesis, a sentence or a short paragraph"),
         threshold: z.number().gt(0).lte(1).optional().describe(`Cosine similarity at or above which the idea counts as close (default ${config.novelty_threshold})`),
         k: z.number().int().min(1).max(10).optional().describe("Nearest articles to return (1-10, default 3)"),
+        ...filterShape,
       }),
     },
     async (params) => jsonResult(await taste.novelty(params)),

@@ -185,7 +185,8 @@ test("coverage is complete once every source has synced and every item has a vec
 
 test("search primitives: scores are dot products, and a query of the wrong size is refused", () => {
   const data = Float32Array.from([1, 0, 0, 1]);
-  const snap = { keys: ["a", "b"], dims: 2, data, owners: new Map([["a", new Set(["archive"])], ["b", new Set(["clip"])]]) };
+  const meta = { domain: "x.example", words: 100, prose_paragraphs: 0, prose_ratio: 0 };
+  const snap = { keys: ["a", "b"], dims: 2, data, owners: new Map([["a", new Set(["archive"])], ["b", new Set(["clip"])]]), meta: new Map([["a", meta], ["b", meta]]) };
   assert.deepEqual([...scoreAll(snap, Float32Array.from([0.6, 0.8]))].map((x) => Math.round(x * 10) / 10), [0.6, 0.8]);
   assert.throws(() => scoreAll(snap, Float32Array.from([1])), /1 dimensions but the index has 2/);
   assert.deepEqual(nearest(snap, config, Float32Array.from([0, 1]), 1).map((h) => h.key), ["b"]);
@@ -245,4 +246,97 @@ test("bagVector embeds shared words closer than unrelated ones (the fake behaves
   const dot = (a: Float32Array, b: Float32Array) => a.reduce((s, x, i) => s + x * b[i], 0);
   assert.ok(dot(bagVector("pooling shrinkage models"), bagVector("pooling models")) > dot(bagVector("pooling shrinkage models"), bagVector("bread dough")));
   assert.equal(new FakeEmbedder().model, "fake");
+});
+
+// --- filters and metadata (1.4.0) ------------------------------------------------
+
+const PROSE = "This is a sentence of ordinary prose that keeps going for a while, as essays do. ".repeat(4).trim();
+const filterSeeds = [
+  { key: "https://essays.example/one", title: "An essay", opening: `${SHARED}\n\n${PROSE}\n\n${PROSE}`, words: 1500, sources: ["archive"] },
+  { key: "https://github.com/someone/tool", title: "GitHub - someone/tool", opening: `${SHARED}\n\n- install\n\n- run`, words: 900, sources: ["karakeep", "archive"] },
+  { key: "https://gist.github.com/someone/1", title: "A gist", opening: `${SHARED} gist`, words: 300, sources: ["karakeep"] },
+  { key: "https://www.blog.example/short", title: "A short note", opening: `${SHARED} note\n\n${PROSE}`, words: 200, sources: ["clip", "archive"] },
+];
+
+test("filters: words, domains (subdomains included), sources and prose paragraphs compose", async () => {
+  const { index } = await seededIndex(config, filterSeeds);
+  const urls = async (args: Record<string, unknown>) =>
+    (await index.similar({ text: SHARED, k: 10, prefer: "archive", min_similarity: 0, ...args })).results.map((r) => r.url).sort();
+  assert.deepEqual(await urls({ min_words: 600 }), ["https://essays.example/one", "https://github.com/someone/tool"]);
+  assert.deepEqual(await urls({ max_words: 300 }), ["https://gist.github.com/someone/1", "https://www.blog.example/short"]);
+  assert.deepEqual(await urls({ exclude_domains: ["GitHub.com"] }), ["https://essays.example/one", "https://www.blog.example/short"]);
+  assert.deepEqual(await urls({ include_domains: ["github.com"] }), ["https://gist.github.com/someone/1", "https://github.com/someone/tool"]);
+  assert.deepEqual(await urls({ include_domains: ["blog.example"] }), ["https://www.blog.example/short"], "www. is ignored");
+  assert.deepEqual(await urls({ sources: ["karakeep"] }), ["https://gist.github.com/someone/1", "https://github.com/someone/tool"]);
+  assert.deepEqual(await urls({ min_prose_paragraphs: 2 }), ["https://essays.example/one"]);
+  assert.deepEqual(await urls({ min_prose_paragraphs: 1, min_words: 600, exclude_domains: ["github.com"] }), ["https://essays.example/one"]);
+  const r = await index.similar({ text: SHARED, min_words: 600, exclude_domains: ["www.GitHub.com"] });
+  assert.deepEqual(r.filters, { min_words: 600, exclude_domains: ["github.com"] }, "filters are echoed, normalized");
+});
+
+test("filters: bad domains, unknown sources and min > max are refused", async () => {
+  const { index } = await seededIndex(config, filterSeeds);
+  await assert.rejects(index.similar({ text: SHARED, exclude_domains: ["not a domain"] }), /not a domain name/);
+  await assert.rejects(index.similar({ text: SHARED, sources: ["nope"] }), /Unknown source\(s\) nope/);
+  await assert.rejects(index.novelty({ idea: SHARED, min_words: 10, max_words: 5 }), /greater than max_words/);
+});
+
+test("fill=false returns only the preferred tier", async () => {
+  const { index } = await seededIndex(config, filterSeeds);
+  const r = await index.similar({ text: SHARED, k: 10, prefer: "clip", min_similarity: 0, fill: false });
+  assert.deepEqual(r.results.map((x) => x.url), ["https://www.blog.example/short"]);
+  assert.equal(r.fill, false);
+});
+
+test("results carry domain, words, prose stats, signals and headings", async () => {
+  const { index } = await seededIndex(config, filterSeeds);
+  const [hit] = (await index.similar({ text: SHARED, k: 1, prefer: "archive", min_similarity: 0, min_prose_paragraphs: 2 })).results;
+  assert.equal(hit.domain, "essays.example");
+  assert.equal(hit.words, 1500);
+  assert.equal(hit.prose_paragraphs, 2);
+  assert.ok((hit.prose_ratio ?? 0) > 0.8);
+  assert.deepEqual(hit.signals, ["archive"]);
+  assert.deepEqual(hit.headings, []);
+  const n = await index.novelty({ idea: SHARED, k: 4 });
+  assert.ok(n.nearest.every((x) => typeof x.domain === "string" && typeof x.words === "number" && Array.isArray(x.signals)));
+});
+
+test("check_novelty takes the same filters; its verdict is unchanged", async () => {
+  const { index } = await seededIndex(config, filterSeeds);
+  const all = await index.novelty({ idea: `${SHARED} gist`, k: 1, threshold: 0.5 });
+  assert.equal(all.nearest[0].url, "https://gist.github.com/someone/1");
+  const filtered = await index.novelty({ idea: `${SHARED} gist`, k: 1, threshold: 0.5, exclude_domains: ["github.com"] });
+  assert.notEqual(filtered.nearest[0].url, "https://gist.github.com/someone/1");
+  assert.ok(["close", "novel"].includes(filtered.verdict));
+  assert.deepEqual(filtered.filters, { exclude_domains: ["github.com"] });
+});
+
+test("a source's exclude_domains drops its membership everywhere, unless another source holds the item", async () => {
+  const cfg = parseTasteConfig({
+    sources: [
+      { name: "archive", type: "inoreader-stream", stream: "user/-/label/Archive" },
+      { name: "clip", type: "inoreader-stream", stream: "user/-/label/Clip" },
+      { name: "highlights", type: "inoreader-annotations" },
+      { name: "karakeep", type: "karakeep", url_env: "KK_URL", key_env: "KK_KEY", exclude_domains: ["github.com"] },
+    ],
+    tiers: [
+      { name: "clip", sources: ["clip"] },
+      { name: "good", sources: ["clip", "highlights", "karakeep"] },
+      { name: "archive", sources: ["*"] },
+    ],
+    default_tier: "good",
+  });
+  const { index } = await seededIndex(cfg, filterSeeds);
+  const r = await index.similar({ text: SHARED, k: 10, prefer: "good", min_similarity: 0 });
+  const byUrl = new Map(r.results.map((x) => [x.url, x]));
+  assert.ok(!byUrl.has("https://gist.github.com/someone/1"), "held only by karakeep: not searched at all");
+  const tool = byUrl.get("https://github.com/someone/tool")!;
+  assert.deepEqual(tool.signals, ["archive"], "still held by archive, but not counted for karakeep");
+  assert.deepEqual(tool.tiers, ["archive"]);
+  const n = await index.novelty({ idea: `${SHARED} gist`, k: 10 });
+  assert.ok(!n.nearest.some((x) => x.url === "https://gist.github.com/someone/1"));
+  const status = index.status();
+  assert.deepEqual(status.counts.excluded_by_source, { karakeep: 2 });
+  assert.equal(status.counts.searchable, 3);
+  assert.deepEqual(status.config.sources.find((s) => s.name === "karakeep")?.exclude_domains, ["github.com"]);
 });

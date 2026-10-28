@@ -132,3 +132,18 @@ test("settings locate the index under the config dir and validate threads", () =
   assert.throws(() => loadTasteSettings({ INOREADER_TASTE_THREADS: "0" }), /THREADS/);
   assert.throws(() => loadTasteSettings({ INOREADER_TASTE_THREADS: "many" }), /THREADS/);
 });
+
+test("exclude_domains: any source may list domains; they are normalized and validated", () => {
+  const cfg = parseTasteConfig({
+    sources: [
+      { name: "a", type: "inoreader-stream", stream: "user/-/label/A", exclude_domains: ["WWW.GitHub.com"] },
+      { name: "h", type: "inoreader-annotations", exclude_domains: ["x.com"] },
+      { name: "k", type: "karakeep", url_env: "U", key_env: "K", exclude_domains: ["reddit.com", "youtube.com"] },
+    ],
+  });
+  assert.deepEqual(cfg.sources.map((s) => s.exclude_domains), [["github.com"], ["x.com"], ["reddit.com", "youtube.com"]]);
+  assert.throws(
+    () => parseTasteConfig({ sources: [{ name: "a", type: "inoreader-stream", stream: "s", exclude_domains: ["not a domain"] }] }),
+    /sources\.0\.exclude_domains\.0: "not a domain" is not a domain name/,
+  );
+});

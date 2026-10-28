@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import * as z from "zod/v4";
+import { normalizeDomain } from "./prose.js";
 
 // The taste index is generic: nothing here names a tag, label, tier or Karakeep
 // instance. What is indexed and how it is grouped comes from a JSON file named by
@@ -20,16 +21,28 @@ const Name = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/, "must be 1-32 characters: letters, digits, '_' or '-'");
 const EnvName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name");
+/** A host name; it also covers its subdomains. Normalized: lowercase, no `www.`. */
+export const DomainSchema = z
+  .string()
+  .transform((d, ctx) => {
+    const n = normalizeDomain(d);
+    if (!n) ctx.addIssue({ code: "custom", message: `"${d}" is not a domain name (e.g. github.com)` });
+    return n ?? d;
+  });
+/** Items from these domains (or their subdomains) do not count as members of the source. */
+const ExcludeDomains = z.array(DomainSchema).max(500).optional();
 
 const StreamSource = z.strictObject({
   name: Name,
   type: z.literal("inoreader-stream"),
   /** Any stream ID: a label, a folder, starred, saved web pages. */
   stream: z.string().min(1),
+  exclude_domains: ExcludeDomains,
 });
 const AnnotationsSource = z.strictObject({
   name: Name,
   type: z.literal("inoreader-annotations"),
+  exclude_domains: ExcludeDomains,
 });
 const KarakeepSource = z.strictObject({
   name: Name,
@@ -41,6 +54,7 @@ const KarakeepSource = z.strictObject({
   min_words: z.number().int().min(0).max(100_000).default(300),
   /** Prefer Karakeep's reader-view classifier (readable / not_readable) over the word count. */
   use_reader_view: z.boolean().default(true),
+  exclude_domains: ExcludeDomains,
 });
 const SourceSchema = z.discriminatedUnion("type", [StreamSource, AnnotationsSource, KarakeepSource]);
 

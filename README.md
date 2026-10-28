@@ -127,6 +127,12 @@ also keeps Karakeep bookmarks:
   `inoreader-annotations`: the annotated stream, keeping each highlight and note. `karakeep`: your
   [Karakeep](https://karakeep.app) bookmarks, for pages saved outside Inoreader (see below). Names
   are 1-32 characters of letters, digits, `_` and `-`.
+- **Per-source `exclude_domains`.** Any source may list domains (`"exclude_domains": ["github.com"]`);
+  a domain also covers its subdomains, and `www.` is ignored. An item from one of them does not
+  count as a member of that source anywhere (tiers, filters, searches); an item no source counts
+  any more is not searched at all. Applied when the index loads, so changing it needs only a
+  restart: nothing is re-read or re-embedded. `taste_index_status` reports how many items each
+  source excludes.
 - **Tiers** are ordered narrowest first and list source names; `*` means all of them. An item is in a
   tier when any of its sources is listed. `default_tier` defaults to the last (widest) tier and
   `novelty_threshold` to 0.75. The file is validated at start: an unknown source in a tier, a
@@ -175,13 +181,40 @@ items are stored without vectors and the next sync embeds them.
 
 | Tool | Description | API Cost |
 |------|-------------|----------|
-| `similar_saved` | Saved items closest to a text, preferred tier first, then wider tiers: title, URL, source, dates, signals, tier, similarity, excerpt, headings, word count, highlights, plus index coverage. `prefer` is one of the configured tier names. | 0 |
-| `check_novelty` | `close` or `novel` for an idea against the nearest saved items in any tier, with their similarity. States that similarity is overlap, not quality. | 0 |
+| `similar_saved` | Saved items closest to a text, preferred tier first, then wider tiers (`fill: false`: the preferred tier only). Accepts the filters below. Each result: title, URL, domain, source, dates, signals, tier(s), similarity, words, prose_paragraphs, prose_ratio, excerpt, headings, highlights; plus the filters applied and index coverage. `prefer` is one of the configured tier names. | 0 |
+| `check_novelty` | `close` or `novel` for an idea against the nearest saved items in any tier, with their similarity, domain, words and signals. Accepts the same filters. States that similarity is overlap, not quality. | 0 |
 | `taste_index_status` | Configured sources and tiers, counts by source and tier, last sync per source, Zone 1 reads per sync, errors, model, whether the index is complete. | 0 |
 | `sync_taste_index` | Run a sync now; returns the reads used. | about 3-5 Z1 (about 55 for a first build of ~1,000 items) |
 
 While the index is still building, `similar_saved` and `check_novelty` report coverage (sources
 synced, items indexed) so an empty answer is not mistaken for a real one.
+
+**Filters** (both tools, all optional, all must pass, applied before ranking and `k`). They describe
+the text and where it came from, not whether it is any good; clients combine them for their own
+purpose, and can filter or rank further on the metadata each result carries.
+
+| Filter | Keeps items |
+|---|---|
+| `min_words`, `max_words` | with at least / at most this many words (whole stored text) |
+| `include_domains`, `exclude_domains` | from / not from these domains (subdomains included, `www.` ignored) |
+| `sources` | held by at least one of these configured sources (after per-source excludes); combines with `prefer` |
+| `min_prose_paragraphs` | whose opening has at least this many prose paragraphs |
+
+A *prose paragraph* is a paragraph of at least 25 words ending in sentence punctuation, counted in
+the item's opening (its first ~1,200 characters, cut at a sentence end), because the opening is all
+the index keeps for items in only the widest tier; every item is measured the same way.
+`prose_ratio` is the share of the opening's words in such paragraphs. Together they are a coarse
+article-versus-page test: on a real index, READMEs, product pages, docs and shop pages mostly had
+0-1 prose paragraphs or a ratio under 0.6, essays 2 or more and 0.6 or more, but about half the
+GitHub READMEs still passed (pair it with `exclude_domains`) and a few essays with unusual markup
+did not.
+
+**What the novelty score can and cannot tell.** Measured on a real index of about 4,000 items:
+paraphrases of an archived essay's thesis scored 0.58 to 0.78 against it, while ideas on the same
+topic making a different point scored 0.62 to 0.76. Similarity separates *related* from
+*unrelated* well, but not *same point* from *same topic*. A high `novelty_threshold` (about 0.78)
+makes `close` rare and reliable; anything below it may still be the same point, so a client that
+cares should read the nearest items and their `similarity` rather than the verdict alone.
 
 In the image, set `INOREADER_TASTE_INDEX=on` and, for a config file, mount it and point
 `INOREADER_TASTE_CONFIG` at it. The model files are in the image (`/app/models`, pinned and

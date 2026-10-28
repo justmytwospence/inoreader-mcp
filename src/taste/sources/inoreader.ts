@@ -1,4 +1,5 @@
 import { apiGet, apiPost } from "../../api.js";
+import { BudgetError } from "../../rate-limit.js";
 import type { ArticleItem, StreamContentsResponse, StreamItemContentsResponse, StreamItemIdsResponse } from "../../types.js";
 import { normalizeItemId } from "../../verify-tags.js";
 import type { Highlight } from "../store.js";
@@ -12,7 +13,7 @@ import type { ItemCandidate } from "./types.js";
 export const ANNOTATED_STREAM = "user/-/state/com.google/annotated";
 export const RESERVE = 25;
 export const IDS_LIMIT = 10_000;
-export const CONTENT_BATCH = 100;
+export const CONTENT_BATCH = 20;
 export const ANNOTATION_PAGE = 100;
 /** Safety cap on annotated-stream paging: 100 pages of 100 items. */
 export const MAX_ANNOTATION_PAGES = 100;
@@ -48,16 +49,38 @@ export async function fetchStreamIds(stream: string): Promise<StreamIds> {
   return { refs, truncated: Boolean(continuation) };
 }
 
-/** Zone 1: one POST per CONTENT_BATCH ids. Returns items keyed by ext id. */
-export async function fetchContents(rawIds: string[]): Promise<Map<string, ArticleItem>> {
-  const out = new Map<string, ArticleItem>();
+export interface Contents {
+  /** Items keyed by ext id. */
+  items: Map<string, ArticleItem>;
+  /** Raw ids whose batch failed: not fetched this time, retried on the next sync. */
+  failed: Set<string>;
+  error?: string;
+}
+
+/**
+ * Zone 1: one POST per CONTENT_BATCH ids. A failed batch does not lose the others:
+ * its ids are reported in `failed` so the caller leaves them for the next sync.
+ * Batches are small because a response carries each item's full stored HTML, and a
+ * 100-item body was observed to be cut off ("terminated") mid-stream.
+ */
+export async function fetchContents(rawIds: string[]): Promise<Contents> {
+  const items = new Map<string, ArticleItem>();
+  const failed = new Set<string>();
+  let error: string | undefined;
   for (let i = 0; i < rawIds.length; i += CONTENT_BATCH) {
+    const batch = rawIds.slice(i, i + CONTENT_BATCH);
     const body = new URLSearchParams();
-    for (const id of rawIds.slice(i, i + CONTENT_BATCH)) body.append("i", id);
-    const data = await apiPost<StreamItemContentsResponse>("/reader/api/0/stream/items/contents", body, undefined, { reserve: RESERVE });
-    for (const item of data.items ?? []) out.set(extIdOf(item.id), item);
+    for (const id of batch) body.append("i", id);
+    try {
+      const data = await apiPost<StreamItemContentsResponse>("/reader/api/0/stream/items/contents", body, undefined, { reserve: RESERVE });
+      for (const item of data.items ?? []) items.set(extIdOf(item.id), item);
+    } catch (e) {
+      if (e instanceof BudgetError) throw e;
+      for (const id of batch) failed.add(id);
+      error = e instanceof Error ? e.message : String(e);
+    }
   }
-  return out;
+  return { items, failed, ...(error ? { error } : {}) };
 }
 
 export function contentBatches(n: number): number {

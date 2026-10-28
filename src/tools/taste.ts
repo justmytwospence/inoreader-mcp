@@ -81,7 +81,7 @@ export function registerTasteTools(server: McpServer): void {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       description:
         "Update the taste index from Inoreader (and Karakeep, if configured) now, instead of waiting for the scheduled sync every 12 hours. Writes only the local index; nothing in the Inoreader account changes. " +
-        "Costs about 3-5 Zone 1 reads for an incremental sync and about 14 for the first, full one: one ids read per stream source, one content read per 100 new items, one annotations read per 100 highlighted items. " +
+        "Costs about 3-5 Zone 1 reads for an incremental sync and about 55 for a first full build of ~1,000 items: one ids read per stream source, one content read per 20 new items, one annotations read per 100 highlighted items. " +
         "It keeps 25 reads in reserve and is refused with the index unchanged when quota is short. Joins a sync already running. Safe to repeat. " +
         POINTER,
       inputSchema: z.object({}),

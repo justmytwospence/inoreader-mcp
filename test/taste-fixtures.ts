@@ -88,6 +88,8 @@ export class FakeInoreader {
   /** Report a continuation on ids, as a stream past the 10000 limit does. */
   truncated = false;
   failIds?: number;
+  /** Fail this many content POSTs (500) before answering normally. */
+  failContents = 0;
   /** Every request, "METHOD path" (plus stream for ids). */
   calls: string[] = [];
   contentBodies: string[][] = [];
@@ -132,6 +134,10 @@ export class FakeInoreader {
       const ids = new URLSearchParams(String(init?.body)).getAll("i");
       this.calls.push("POST contents");
       this.contentBodies.push(ids);
+      if (this.failContents > 0) {
+        this.failContents--;
+        return this.json({ error: "boom" }, 400);
+      }
       const wanted = new Set(ids.map((i) => BigInt(i).toString()));
       const found = this.all().filter((i) => wanted.has(BigInt(i.id).toString()));
       const unique = [...new Map(found.map((i) => [i.id, i])).values()];

@@ -166,9 +166,9 @@ there is no scheduler, only `sync_taste_index`. Disabling the keepalive (`INOREA
 also disables the scheduled sync.
 
 A sync costs one Zone 1 read of stream membership per 10,000 members of each stream source (which also
-catches removals), one content read per 100 new items, and one annotations read per 100 highlighted
-items; Karakeep is local and costs no Inoreader reads. A first full build of two streams and an
-annotated stream is about 14 reads, an incremental sync 3 to 5. A sync keeps 25 reads in reserve
+catches removals), one content read per 20 new items, and one annotations read per 100 highlighted
+items; Karakeep is local and costs no Inoreader reads. A first full build of two streams of ~1,000 items and an
+annotated stream is about 55 reads (content is read 20 items at a time: a response carries each item's full stored HTML), an incremental sync 3 to 5. A sync keeps 25 reads in reserve
 (like `analyze_feeds`) and, if quota is short, does nothing and leaves the index unchanged. A failing
 source keeps its stored members and is reported; the others still apply. If the model cannot load,
 items are stored without vectors and the next sync embeds them.
@@ -178,7 +178,7 @@ items are stored without vectors and the next sync embeds them.
 | `similar_saved` | Saved items closest to a text, preferred tier first, then wider tiers: title, URL, source, dates, signals, tier, similarity, excerpt, headings, word count, highlights, plus index coverage. `prefer` is one of the configured tier names. | 0 |
 | `check_novelty` | `close` or `novel` for an idea against the nearest saved items in any tier, with their similarity. States that similarity is overlap, not quality. | 0 |
 | `taste_index_status` | Configured sources and tiers, counts by source and tier, last sync per source, Zone 1 reads per sync, errors, model, whether the index is complete. | 0 |
-| `sync_taste_index` | Run a sync now; returns the reads used. | about 3-5 Z1 (about 14 for the first) |
+| `sync_taste_index` | Run a sync now; returns the reads used. | about 3-5 Z1 (about 55 for a first build of ~1,000 items) |
 
 While the index is still building, `similar_saved` and `check_novelty` report coverage (sources
 synced, items indexed) so an empty answer is not mistaken for a real one.

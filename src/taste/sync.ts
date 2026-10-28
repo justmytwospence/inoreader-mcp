@@ -202,30 +202,30 @@ export async function runSync(deps: SyncDeps): Promise<SyncReport> {
         need.set(r.ext, r.raw);
       }
     }
+    let unfetched = new Set<string>();
     let contentError: string | undefined;
     if (need.size) {
       assertBudget(1, contentBatches(need.size), "taste sync content", RESERVE);
-      try {
-        for (const [ext, item] of await fetchContents([...need.values()])) cache.set(ext, item);
-      } catch (e) {
-        if (e instanceof BudgetError) throw e;
-        contentError = errText(e);
-      }
+      const got = await fetchContents([...need.values()]);
+      for (const [ext, item] of got.items) cache.set(ext, item);
+      unfetched = got.failed;
+      contentError = got.error;
     }
 
     for (const s of streamSources) {
       const ids = idsBySource.get(s.name);
       if (!ids) continue;
       const known = store.signalsOf(s.name);
-      const hadNew = ids.refs.some((r) => !known.has(r.ext));
-      if (contentError && hadNew && ids.refs.some((r) => need.has(r.ext))) {
-        failed.set(s.name, `content fetch failed: ${contentError}`);
-        continue;
-      }
       const upserts: SignalRow[] = [];
       const candidates: ItemCandidate[] = [];
+      let skipped = 0;
       for (const r of ids.refs) {
         if (known.has(r.ext)) continue;
+        // Its content batch failed: not recorded, so the next sync fetches it again.
+        if (unfetched.has(r.raw)) {
+          skipped++;
+          continue;
+        }
         const prior = store.keyOfExtId(r.ext);
         if (prior) {
           upserts.push({ source: s.name, ext_id: r.ext, key: prior.key, fp: "", added_at: null, highlights: [] });
@@ -236,6 +236,7 @@ export async function runSync(deps: SyncDeps): Promise<SyncReport> {
         if (cand) candidates.push(cand);
         upserts.push({ source: s.name, ext_id: r.ext, key: cand?.key ?? null, fp: item ? "" : "missing", added_at: null, highlights: [] });
       }
+      if (skipped) failed.set(s.name, `${skipped} new item(s) not fetched, retried next sync: ${contentError}`);
       // A stream longer than the ids limit lists only its newest items, so absence proves nothing.
       batches.push({ source: s.name, present: ids.truncated ? null : new Set(ids.refs.map((r) => r.ext)), upserts, candidates });
     }
@@ -337,7 +338,8 @@ export async function runSync(deps: SyncDeps): Promise<SyncReport> {
     }
     for (const [name, message] of failed) {
       if (!state[name]) continue; // "embedding" is not a source
-      sources[name] = { ok: false, error: message, new_members: 0, removed_members: 0 };
+      // A source can have applied part of its batch (some content batches failed): keep its counts.
+      sources[name] = { ...(sources[name] ?? { new_members: 0, removed_members: 0 }), ok: false, error: message };
       state[name] = { ...state[name], last_error: message };
     }
 

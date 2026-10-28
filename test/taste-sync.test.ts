@@ -353,3 +353,25 @@ test("a default-config sync reads starred and highlights", async () => {
   assert.deepEqual(store.countsBySource(), { starred: 2, highlights: 1 });
   assert.equal(ino.requests, 3);
 });
+
+test("a failed content batch keeps the other batches and is fetched again on the next sync", async () => {
+  const { ino, store, run } = world();
+  const many = Array.from({ length: 30 }, (_, i) => item(String(2000 + i), `m${i}`));
+  ino.streams.set("user/-/label/Archive", many);
+  ino.streams.set("user/-/label/Clip", []);
+  ino.annotated = [];
+  ino.failContents = 1; // the first batch of 20 fails (400: not retried)
+
+  const first = await run();
+  assert.equal(first.outcome, "partial");
+  assert.deepEqual(ino.contentBodies.map((b) => b.length), [20, 10]);
+  assert.equal(first.sources.archive.new_members, 10, "the second batch still applies");
+  assert.match(first.sources.archive.error ?? "", /20 new item\(s\) not fetched, retried next sync/);
+
+  ino.contentBodies.length = 0;
+  const second = await run();
+  assert.equal(second.outcome, "ok");
+  assert.deepEqual(ino.contentBodies.map((b) => b.length), [20], "only the failed ids are fetched again");
+  assert.equal(second.sources.archive.new_members, 20);
+  assert.ok(store.itemCount() >= 30);
+});

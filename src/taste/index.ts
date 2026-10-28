@@ -284,7 +284,7 @@ export class TasteIndex {
           expected_per_sync: streams + annotationPages,
           cost_model:
             `One ids read per stream source (${streams}), one annotations read per 100 highlighted items (~${annotationPages}), ` +
-            "and one content read per 100 new items (a first sync reads all of them). Karakeep is local and costs no Inoreader reads. " +
+            "and one content read per 20 new items (a first sync reads all of them). Karakeep is local and costs no Inoreader reads. " +
             "A sync keeps 25 Zone 1 reads in reserve and is refused, leaving the index unchanged, when quota is short.",
         },
       },

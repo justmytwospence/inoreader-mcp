@@ -17,7 +17,7 @@ export const DecisionsSchema = z.object({
   intents: z.array(intent), migrations: z.array(z.object({ old_id: z.string(), new_id: z.string(), at: time, status: z.enum(["pending", "complete"]) })),
 });
 export type Decisions = z.infer<typeof DecisionsSchema>;
-const subscription = z.object({ id: z.string(), title: z.string(), categories: z.array(z.object({ id: z.string(), label: z.string() })), url: z.string(), htmlUrl: z.string(), iconUrl: z.string().optional(), firstitemmsec: z.string().optional(), sortid: z.string().optional() });
+const subscription = z.object({ id: z.string(), title: z.string(), categories: z.array(z.object({ id: z.string(), label: z.string() })), url: z.string(), htmlUrl: z.string(), iconUrl: z.string().optional(), firstitemmsec: z.union([z.string(), z.number().finite()]).optional(), sortid: z.string().optional() });
 export const SnapshotSchema = z.object({
   version: z.literal(1), id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), config_hash: z.string(), model: z.literal("category-beta-v1"),
   started_at: time, completed_at: time.nullable(), cutoff: time,

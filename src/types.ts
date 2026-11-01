@@ -11,7 +11,7 @@ export interface InoreaderSubscription {
   url: string;
   htmlUrl: string;
   iconUrl?: string;
-  firstitemmsec?: string;
+  firstitemmsec?: string | number;
   sortid?: string;
 }
 

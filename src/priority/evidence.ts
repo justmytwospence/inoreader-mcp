@@ -5,7 +5,7 @@ import { labelType } from "../labels.js";
 import { normalizeItemId } from "../verify-tags.js";
 import type { InoreaderSubscription, StreamContentsResponse, StreamItemIdsResponse, SubscriptionListResponse, TagListResponse, UnreadCountResponse } from "../types.js";
 import { configHash, type PriorityProfile } from "./config.js";
-import { readDecisions, readSnapshot, saveDecisions, saveSnapshot, type Decisions, type PrioritySnapshot } from "./store.js";
+import { readDecisions, readSnapshot, saveDecisions, saveSnapshot, SnapshotSchema, type Decisions, type PrioritySnapshot } from "./store.js";
 
 export const DAY = 86400000;
 export const weekKey = (at: number): string => {
@@ -80,7 +80,10 @@ export async function refreshEvidence(p: PriorityProfile, args: { start_new?: bo
   while (used < max && s.phase !== "complete") {
     try {
       if (s.phase === "subscriptions") {
-        s.subscriptions = validateMembership(await get<SubscriptionListResponse>("/reader/api/0/subscription/list", { output: "json" }));
+        // Validate/strip native metadata before mutating the checkpoint or preferences.
+        // A malformed response then remains a recorded, resumable read failure.
+        const subscriptions = validateMembership(await get<SubscriptionListResponse>("/reader/api/0/subscription/list", { output: "json" }));
+        s.subscriptions = SnapshotSchema.shape.subscriptions.parse(subscriptions);
         s.membership = observeMembership(p, d, s.subscriptions, Date.now());
         await saveDecisions(p.name, d); s.phase = "metadata";
       } else if (s.phase === "metadata") {

@@ -56,6 +56,38 @@ function mock(handler: (url: URL) => unknown, metadata: unknown = { unreadcounts
 }
 const streamId = (url: URL) => decodeURIComponent(url.pathname.split("/stream/contents/")[1] ?? "");
 
+test("native numeric and legacy string subscription timestamps checkpoint and resume", async () => {
+  for (const firstitemmsec of [1790000000000, "1790000000000"]) {
+    const p = profile(`native-metadata-${typeof firstitemmsec}`);
+    const urls = mock(url => {
+      if (url.pathname.endsWith("subscription/list")) return { subscriptions: [{ ...sub(), firstitemmsec }] };
+      throw new Error(`Unexpected ${url.pathname}`);
+    });
+    const first = await refreshEvidence(p, { start_new: true, max_requests: 1 });
+    assert.equal(first.progress.phase, "metadata");
+    assert.deepEqual(first.progress.errors, []);
+    assert.equal(first.used_reads, 1);
+    assert.equal((await readSnapshot(p.name, first.snapshot_id)).subscriptions[0].firstitemmsec, firstitemmsec);
+    const next = await refreshEvidence(p, { snapshot_id: first.snapshot_id, max_requests: 1 });
+    assert.equal(next.progress.phase, "tags");
+    assert.equal(urls.filter(url => url.pathname.endsWith("subscription/list")).length, 1);
+  }
+});
+
+test("invalid subscription metadata records its read cost without corrupting the cursor", async () => {
+  const p = profile("invalid-native-metadata");
+  mock(() => ({ subscriptions: [{ ...sub(), firstitemmsec: { invalid: true } }] }));
+  const r = await refreshEvidence(p, { start_new: true, max_requests: 1 });
+  assert.equal(r.complete, false);
+  assert.equal(r.used_reads, 1);
+  assert.equal(r.total_base_reads, 1);
+  assert.equal(r.progress.phase, "subscriptions");
+  assert.match(r.progress.errors.join(" "), /firstitemmsec/);
+  const snapshot = await readSnapshot(p.name, r.snapshot_id);
+  assert.equal(snapshot.subscriptions.length, 0);
+  assert.equal(snapshot.base_reads, 1);
+});
+
 test("one-read checkpoints resume after a process restart and finish paged volumes", async () => {
   const p = profile("resume");
   const now = Date.now();

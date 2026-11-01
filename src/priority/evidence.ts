@@ -44,11 +44,12 @@ export async function readFreshMembership(p: PriorityProfile, d: Decisions): Pro
   return subs;
 }
 function mergeArticles(a: { id: string; timestamp: number }[], b: { id: string; timestamp: number }[]): { id: string; timestamp: number }[] {
-  const map = new Map(a.map(x => [x.id, x]));
-  for (const x of b) {
-    const old = map.get(x.id);
-    if (old && old.timestamp !== x.timestamp) throw new Error(`Inconsistent timestamp for article ${x.id}`);
-    map.set(x.id, x);
+  // IDs are already normalized at ingestion; numeric-only hex IDs must not be
+  // normalized again. API dates can change across tags, pages, or snapshots:
+  // retain the first recorded timestamp, especially in the exposure ledger.
+  const map = new Map<string, { id: string; timestamp: number }>();
+  for (const entries of [a, b]) {
+    for (const x of entries) if (!map.has(x.id)) map.set(x.id, x);
   }
   return [...map.values()].sort((x, y) => x.id.localeCompare(y.id));
 }

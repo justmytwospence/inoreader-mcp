@@ -236,6 +236,97 @@ test("decimal volume IDs and hexadecimal signal IDs match and deduplicate", asyn
   assert.equal(row.historical.n, 1); assert.equal(row.historical.k, 1);
 });
 
+test("Archive and Clip duplicates keep first dates and normalized numeric-only hex IDs across resumed pages", async () => {
+  const archive = "user/-/label/Archive", clip = "user/-/label/Clip";
+  const p = profile("archive-clip-pages", [archive, clip]);
+  const now = Date.now();
+  const longId = "tag:google.com,2005:reader/item/0000001234567890";
+  const decimalId = "78187493520";
+  const signalFirst = { id: "1234567890", timestamp: now - 10 * DAY };
+  const volumeFirst = { id: "1234567890", timestamp: now - 9 * DAY };
+  const urls = mock(url => {
+    if (url.pathname.endsWith("subscription/list")) return { subscriptions: [sub()] };
+    if (url.pathname.endsWith("tag/list")) return { tags: [archive, clip].map(id => ({ id, type: "tag" })) };
+    if (streamId(url) === archive) return url.searchParams.has("c")
+      ? { items: [article(decimalId, now - 12 * DAY), article(longId, now - 3 * DAY)] }
+      : { items: [article(longId, signalFirst.timestamp)], continuation: "archive-next" };
+    if (streamId(url) === clip) return { items: [article(decimalId, now - DAY)] };
+    assert.equal(url.pathname, "/reader/api/0/stream/items/ids");
+    return url.searchParams.has("c")
+      ? { itemRefs: refs([article(longId, now - 2 * DAY)]) }
+      : { itemRefs: refs([article(decimalId, volumeFirst.timestamp), article(longId, now - 11 * DAY)]), continuation: "volume-next" };
+  });
+  let r = await refreshEvidence(p, { start_new: true, max_requests: 4 });
+  const id = r.snapshot_id;
+  assert.equal(r.next_cursor?.continuation, "archive-next");
+  assert.deepEqual((await readSnapshot(p.name, id)).signals[feed], [signalFirst]);
+  r = await refreshEvidence(p, { snapshot_id: id, max_requests: 1 });
+  assert.deepEqual(r.progress.errors, []);
+  assert.equal(r.next_cursor?.source_index, 1);
+  assert.equal(r.next_cursor?.continuation, null);
+  assert.equal(urls.at(-1)?.searchParams.get("c"), "archive-next");
+  r = await refreshEvidence(p, { snapshot_id: id, max_requests: 1 });
+  assert.equal(r.next_cursor?.phase, "volumes");
+  assert.deepEqual((await readSnapshot(p.name, id)).signals[feed], [signalFirst]);
+  r = await refreshEvidence(p, { snapshot_id: id, max_requests: 1 });
+  assert.equal(r.next_cursor?.continuation, "volume-next");
+  let s = await readSnapshot(p.name, id);
+  assert.deepEqual(s.volumes[feed].articles, [volumeFirst]);
+  assert.equal(s.volumes[feed].complete, false);
+  assert.equal((await readDecisions(p.name)).observations[feed].last_complete, null);
+  r = await refreshEvidence(p, { snapshot_id: id, max_requests: 1 });
+  assert.equal(r.complete, true);
+  assert.deepEqual(r.progress.errors, []);
+  assert.equal(r.total_base_reads, 8);
+  assert.equal(urls.at(-1)?.searchParams.get("c"), "volume-next");
+  s = await readSnapshot(p.name, id);
+  assert.deepEqual(s.signals[feed], [signalFirst]);
+  assert.deepEqual(s.volumes[feed].articles, [volumeFirst]);
+  assert.equal(s.source_coverage[archive], true);
+  assert.equal(s.source_coverage[clip], true);
+  const row = evaluateSnapshot(p, s, await readDecisions(p.name)).rows[0];
+  assert.equal(row.historical.n, 1);
+  assert.equal(row.historical.k, 1);
+});
+
+test("exposure ledger retains its first timestamp across snapshots with changed dates and ID forms", async () => {
+  const p = profile("stable-exposure");
+  const base = Math.floor(Date.now() / 1000) * 1000;
+  const longId = "tag:google.com,2005:reader/item/0000001234567890";
+  const decimalId = "78187493520";
+  const exposure = { id: "1234567890", timestamp: base + DAY / 2 };
+  let timestamp = exposure.timestamp;
+  Date.now = () => base;
+  mock(url => {
+    if (url.pathname.endsWith("subscription/list")) return { subscriptions: [sub()] };
+    if (url.pathname.endsWith("tag/list")) return { tags: [{ id: tag, type: "tag" }] };
+    if (streamId(url) === tag) return { items: [article(longId, timestamp)] };
+    return { itemRefs: refs([article(decimalId, timestamp), article(longId, timestamp + 1000)]) };
+  });
+  try {
+    let r = await refreshEvidence(p, { start_new: true, max_requests: 10 });
+    assert.equal(r.complete, true);
+    const firstId = r.snapshot_id;
+    assert.deepEqual((await readDecisions(p.name)).observations[feed].articles, [exposure]);
+    for (const [elapsed, changedTimestamp] of [[8 * DAY, base + 7 * DAY], [9 * DAY, base + DAY / 4], [10 * DAY, base - DAY]]) {
+      Date.now = () => base + elapsed;
+      timestamp = changedTimestamp;
+      r = await refreshEvidence(p, { start_new: true, max_requests: 10 });
+      assert.equal(r.complete, true);
+      assert.deepEqual(r.progress.errors, []);
+      const s = await readSnapshot(p.name, r.snapshot_id);
+      assert.deepEqual(s.volumes[feed].articles, [{ id: exposure.id, timestamp }]);
+      assert.deepEqual(s.prospective[feed].articles, [exposure]);
+      assert.deepEqual((await readDecisions(p.name)).observations[feed].articles, [exposure]);
+      assert.equal(s.prospective[feed].gap_blocked, false);
+      const row = evaluateSnapshot(p, s, await readDecisions(p.name)).rows[0];
+      assert.equal(row.prospective.n, 1, "changed API dates must not reset maturation");
+      assert.equal(row.prospective.k, 1);
+    }
+    assert.deepEqual((await readSnapshot(p.name, firstId)).prospective[feed].articles, [exposure]);
+  } finally { Date.now = originalNow; }
+});
+
 test("all subscriptions report newest metadata even for a never-engaged unscanned feed", async () => {
   const p = profile("newest-metadata");
   const now = Math.floor(Date.now() / 1000) * 1000;

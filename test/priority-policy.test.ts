@@ -58,6 +58,99 @@ test("two successive weekly snapshots required; exclusion veto and weekly pendin
   d.preferences["feed/a"] = { pin: true, exclude: true, history: [] };
   assert.equal(policyReport(enabled, s, d, [old, s]).rows[0].auto_add_candidate, false);
 });
+test("positive label dates never select the canonical exposure window or maturity", () => {
+  const s = snapshot("canonical", now), d = emptyDecisions();
+  const canonical = [article("long-normalized", now - 7 * DAY), article("recent", now - 6 * DAY), article("too-old", s.cutoff - DAY), article("pre-observation", now - 101 * DAY)];
+  s.volumes["feed/a"].articles = canonical;
+  s.prospective["feed/a"].articles = canonical;
+  // Simulate saves from different streams/times; all dates are irrelevant here.
+  s.signals["feed/a"] = canonical.map((a, i) => ({ ...a, timestamp: i % 2 ? now : s.cutoff - 30 * DAY }));
+  const row = evaluateSnapshot(p, s, d).rows[0];
+  assert.equal(row.historical.n, 3); assert.equal(row.historical.k, 3);
+  assert.equal(row.prospective.n, 1); assert.equal(row.prospective.k, 1);
+  assert.equal(row.prospective.engagement_complete, true);
+  assert.equal(row.prospective.volume_complete, true);
+  // Known feed exposure predating observation may be absent from the forward ledger.
+  s.prospective["feed/a"].articles = canonical.slice(0, 2);
+  assert.equal(evaluateSnapshot(p, s, d).rows[0].prospective.engagement_complete, true);
+  s.signals["feed/a"].push(article("unknown-exposure", s.cutoff - DAY));
+  const unknown = evaluateSnapshot(p, s, d).rows[0];
+  assert.equal(unknown.prospective.engagement_complete, false);
+  assert.equal(unknown.historical.engagement_complete, false);
+  assert.equal(unknown.evidence_eligible, false);
+});
+test("one fresh complete mature-historical snapshot qualifies provisionally without forward history", () => {
+  const at = Date.now(), s = snapshot("provisional", at), d = emptyDecisions();
+  const profile = { ...p, promotion_mode: "provisional" as const, promotion_probability: 0.95 };
+  s.prospective = {};
+  // Raw historical context includes recent posts; promotion must not include them.
+  const recent = Array.from({ length: 30 }, (_, i) => article(`recent-${i}`, at - DAY));
+  s.volumes["feed/a"].articles.push(...recent);
+  s.signals["feed/a"] = s.signals["feed/a"].map(a => ({ ...a, timestamp: at }));
+  s.signals["feed/a"].push(...recent);
+  let r = policyReport(profile, s, d, [s]), row = r.rows[0];
+  assert.equal(row.historical.n, 80); assert.equal(row.historical.k, 70);
+  assert.equal(row.prospective.n, 0);
+  assert.equal(row.promotion_evidence.basis, "mature_historical");
+  assert.equal(row.promotion_evidence.n, 50); assert.equal(row.promotion_evidence.k, 40);
+  assert.equal(row.promotion_evidence.benchmark, 0.2);
+  assert.ok(row.promotion_evidence.probability_above! >= 0.95);
+  assert.equal(row.auto_add_candidate, true); assert.equal(row.two_weekly_qualifying, false);
+  assert.deepEqual(r.ranked_ids, ["feed/a"]);
+  assert.ok(!row.reasons.includes("requires_two_successive_complete_weekly_snapshots"));
+  assert.equal(calibrationReport(profile, [s], d).ready_for_review, false);
+  assert.equal(r.cutoff_sweep.find(c => c.probability === 0.95)?.qualifying_feeds, 1);
+  assert.ok(r.cutoff_sweep.every(c => c.basis === "mature_historical"));
+  assert.equal(r.promotion_priors.global_observations, 1050);
+  assert.equal(r.historical_priors.global_observations, 1080);
+  const calibrated = policyReport({ ...profile, promotion_mode: "calibrated" }, s, d, [s]);
+  assert.deepEqual(calibrated.ranked_ids, []);
+  assert.equal(calibrated.rows[0].promotion_evidence.basis, "prospective");
+  for (const mutate of [
+    (x: PrioritySnapshot) => { x.phase = "volumes"; x.completed_at = null; },
+    (x: PrioritySnapshot) => { x.started_at -= 8 * DAY; },
+    (x: PrioritySnapshot) => { x.source_coverage[p.positive_streams[0]] = false; },
+    (x: PrioritySnapshot) => { x.signals["feed/a"].push(article("missing-canonical", at)); },
+    (x: PrioritySnapshot) => { x.volumes["feed/a"].articles = x.volumes["feed/a"].articles.slice(0, 19); x.signals["feed/a"] = x.volumes["feed/a"].articles; },
+    (x: PrioritySnapshot) => { x.signals["feed/a"] = x.signals["feed/a"].slice(0, 4); },
+  ]) {
+    const copy = structuredClone(s); mutate(copy);
+    assert.equal(policyReport(profile, copy, d, [copy]).rows[0].auto_add_candidate, false);
+  }
+  d.preferences["feed/a"] = { pin: false, exclude: true, history: [] };
+  assert.deepEqual(policyReport(profile, s, d, [s]).ranked_ids, []);
+});
+test("provisional rank, sweep, queue and both five-addition caps use mature historical evidence", () => {
+  const at = Date.now(), s = snapshot("rank-history", at), d = emptyDecisions();
+  const profile = { ...p, promotion_mode: "provisional" as const, promotion_probability: 0.95 };
+  // Six qualifying feeds and a large low-rate topic baseline. Deliberately empty
+  // forward evidence would rank nothing if any report path used legacy stats.
+  const template = s.subscriptions[0];
+  for (let i = 0; i < 6; i++) {
+    const id = `feed/c${i}`, articles = Array.from({ length: 50 }, (_, j) => article(`${id}-${j}`, at - 8 * DAY));
+    s.subscriptions.push({ ...template, id });
+    s.volumes[id] = { articles, complete: true, observed_at: at };
+    s.signals[id] = articles.slice(0, 35 + i);
+  }
+  const baseline = s.volumes["feed/b"].articles;
+  for (let i = 0; i < 9000; i++) baseline.push(article(`base-extra-${i}`, at - 8 * DAY));
+  s.prospective = {};
+  let r = policyReport(profile, s, d, [s]);
+  assert.equal(r.ranked_ids.length, 5);
+  assert.equal(r.rows.filter(row => row.queued).length, 2);
+  assert.ok(r.rows.filter(row => row.auto_add_candidate).every(row => row.promotion_evidence.probability_above! >= 0.95));
+  const ranked = r.rows.filter(row => row.auto_add_candidate).sort((a, b) => b.promotion_evidence.probability_above! - a.promotion_evidence.probability_above! || b.promotion_evidence.k - a.promotion_evidence.k || a.stream_id.localeCompare(b.stream_id));
+  assert.deepEqual(r.ranked_ids, ranked.slice(0, 5).map(row => row.stream_id));
+  assert.equal(r.cutoff_sweep.find(c => c.probability === 0.95)?.qualifying_feeds, 7);
+  d.intents = Array.from({ length: 5 }, (_, i) => ({ id: String(i), reason: "reserved", config_hash: configHash(p), original_topic_ids: [], stream_id: `feed/reserved-${i}`, action: "auto_add", at, week: weekKey(Date.now()), status: "unverified" }));
+  r = policyReport(profile, s, d, [s]);
+  assert.equal(r.weekly_slots, 0); assert.deepEqual(r.ranked_ids, []);
+  for (const intent of d.intents) { intent.week = "previous-week"; intent.snapshot_id = s.id; }
+  r = policyReport(profile, s, d, [s]);
+  assert.equal(r.weekly_additions_reserved, 0); assert.equal(r.snapshot_additions_reserved, 5); assert.deepEqual(r.ranked_ids, []);
+  for (const intent of d.intents) intent.status = "not_applied";
+  assert.equal(policyReport(profile, s, d, [s]).ranked_ids.length, 5);
+});
 test("training-only snapshots never satisfy held-out calibration readiness", () => {
   const d = emptyDecisions();
   const all = Array.from({ length: 4 }, (_, i) => snapshot(`week${i}`, now + i * 7 * DAY));

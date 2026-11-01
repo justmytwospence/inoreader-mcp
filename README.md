@@ -264,9 +264,11 @@ These operations collect evidence but do not populate the folder.
 
 The signal is **explicit starred/tagged engagement**, not the ordinary read flag.
 Operational folders, automated recommendation tags and negative feedback are not positive
-signals. Historical rates describe retrievable history: retention and unknown subscription
-dates can bias them. Automatic additions instead require complete, mature forward-observed
-evidence and exact category-pooled Beta–Binomial posterior probabilities.
+signals. IDs identify articles: differing saved-stream dates are deduplicated rather than
+rejected, and feed/cohort dates determine exposure and maturity. Historical rates describe retrievable history: retention and unknown subscription
+dates can bias them. Calibrated additions require complete, mature forward-observed evidence. Explicitly
+reviewed provisional mode instead uses mature historical evidence with the same exact
+category-pooled Beta–Binomial model; its cutoff is not empirically calibrated.
 
 | Tool | Purpose | API cost |
 |------|---------|----------|
@@ -275,10 +277,18 @@ evidence and exact category-pooled Beta–Binomial posterior probabilities.
 | `manage_feed_priority` | Apply an enabled policy's guarded `auto_add`, or explicit human `pin`, `exclude`, `allow`, `remove` decisions. | Local decisions cost 0; membership operations use fresh reads and verified writes |
 
 A newly configured profile starts in **shadow mode**: automatic additions are disabled,
-there is no default promotion-confidence cutoff, and no membership is seeded. Compare
-cutoff sweeps and held-out posterior-predictive checks before reviewing and explicitly
-enabling a policy. A posterior probability is not itself evidence of empirical calibration.
+there is no default promotion-confidence cutoff, and no membership is seeded. The default
+`promotion_mode: "calibrated"` retains prospective calibration and two-week confirmation.
+An operator can explicitly choose `promotion_mode: "provisional"` with a matching
+`provisional_review` acknowledging the lack of empirical calibration and a probability
+cutoff of at least 0.95. That mode can act after one complete fresh snapshot, using at
+least 20 historical articles aged seven days and five positive engagements. It keeps the
+same topic-relative benchmark and five-addition limits. Set the review's `config_hash`
+from `get_feed_priority`, with matching probability and an ISO `reviewed_at`; do not
+fabricate a calibration review. `activation` reports the mode and readiness separately
+from `calibration`. A posterior probability is not itself empirical calibration.
 Missing, stale, partial or retention-inconsistent evidence cannot authorize additions.
+The first bounded scan may take several days; provisional mode does not bypass it.
 
 There is **no automatic removal or unsubscribe action**. Removal suggestions are advisory;
 `pin` and `remove` require the user's explicit instruction. `remove` means removal from the

@@ -8,16 +8,23 @@ function topicFolders(p: PriorityProfile, folders: string[]): string[] {
   const excluded = new Set(excludedFolders(p).map(folder => folder.trim().toLowerCase()));
   return folders.filter(folder => !excluded.has(folder.trim().toLowerCase()));
 }
-function counts(p: PriorityProfile, s: PrioritySnapshot, prospective: boolean): FeedCounts[] {
+function counts(p: PriorityProfile, s: PrioritySnapshot, prospective: boolean, matureHistorical = false): FeedCounts[] {
   const sourcesComplete = p.positive_streams.every(id => s.source_coverage[id] === true);
   return s.subscriptions.map(sub => {
     const volume = s.volumes[sub.id];
     const cohort = s.prospective[sub.id];
-    const articles = prospective ? (cohort?.articles ?? []).filter(a => a.timestamp >= Math.max(s.cutoff, cohort!.first_observed) && a.timestamp <= s.started_at - p.maturation_days * DAY) : (volume?.articles ?? []).filter(a => a.timestamp >= s.cutoff && a.timestamp <= s.started_at);
-    const ids = new Set(articles.map(a => a.id));
-    const positives = (s.signals[sub.id] ?? []).filter(a => a.timestamp <= (prospective ? s.started_at - p.maturation_days * DAY : s.started_at) && a.timestamp >= (prospective ? Math.max(s.cutoff, cohort?.first_observed ?? Infinity) : s.cutoff));
-    const inconsistent = positives.some(a => !ids.has(a.id));
-    return { stream_id: sub.id, folders: topicFolders(p, sub.categories.map(c => c.label)), k: prospective ? positives.filter(a => ids.has(a.id)).length : positives.length, n: articles.length, volume_complete: volume?.complete === true && !inconsistent, engagement_complete: sourcesComplete && !inconsistent };
+    // IDs are normalized once at ingestion. Label dates are not exposure dates:
+    // select the feed/cohort window first, then join positive membership by ID.
+    const earliest = prospective ? Math.max(s.cutoff, cohort?.first_observed ?? Infinity) : s.cutoff;
+    const latest = s.started_at - (prospective || matureHistorical ? p.maturation_days * DAY : 0);
+    const canonical = prospective ? cohort?.articles ?? [] : volume?.articles ?? [];
+    const articles = new Map(canonical.filter(a => a.timestamp >= earliest && a.timestamp <= latest).map(a => [a.id, a]));
+    const known = new Set([...(volume?.articles ?? []), ...(cohort?.articles ?? [])].map(a => a.id));
+    const positives = new Set((s.signals[sub.id] ?? []).map(a => a.id));
+    // Known articles outside this cohort are not missing exposure. Truly unknown
+    // canonical exposure still fails closed, regardless of the label timestamp.
+    const inconsistent = [...positives].some(id => !known.has(id));
+    return { stream_id: sub.id, folders: topicFolders(p, sub.categories.map(c => c.label)), k: [...positives].filter(id => articles.has(id)).length, n: articles.size, volume_complete: volume?.complete === true && !inconsistent, engagement_complete: sourcesComplete && !inconsistent };
   });
 }
 function posterior(p: PriorityProfile, row: FeedCounts, priors: PriorReport) {
@@ -30,25 +37,34 @@ function posterior(p: PriorityProfile, row: FeedCounts, priors: PriorReport) {
   return { k: row.k, n: row.n, volume_complete: row.volume_complete, engagement_complete: row.engagement_complete, retention_adjusted: row.volume_complete !== true || row.engagement_complete !== true, posterior: result, benchmark, baseline, global_fallback: !folders.length || folders.some(f => priors.fallback_categories.includes(f)), probability_above: result && benchmark < 1 ? 1 - betaCdf(benchmark, result.alpha, result.beta) : result ? 0 : null };
 }
 export function evaluateSnapshot(p: PriorityProfile, s: PrioritySnapshot, d: Decisions) {
-  const historical = counts(p, s, false), forward = counts(p, s, true);
+  const historical = counts(p, s, false), forward = counts(p, s, true), matureHistorical = counts(p, s, false, true);
   const historicalPriors = fitCategoryPriors(historical, excludedFolders(p), p.prior_strength);
   const forwardPriors = fitCategoryPriors(forward, excludedFolders(p), p.prior_strength);
+  const matureHistoricalPriors = fitCategoryPriors(matureHistorical, excludedFolders(p), p.prior_strength);
+  const provisional = p.promotion_mode === "provisional";
   const rows = s.subscriptions.map((sub, i) => {
     const h = posterior(p, historical[i], historicalPriors), f = posterior(p, forward[i], forwardPriors);
+    const selected = provisional ? posterior(p, matureHistorical[i], matureHistoricalPriors) : f;
+    const promotionEvidence = { basis: provisional ? "mature_historical" as const : "prospective" as const, ...selected };
     const pref = d.preferences[sub.id];
     const reasons: string[] = [];
     if (s.phase !== "complete" || !s.completed_at) reasons.push("snapshot_incomplete");
     if (s.config_hash !== configHash(p)) reasons.push("config_mismatch");
-    if (!f.volume_complete || !f.engagement_complete) reasons.push("incomplete_or_inconsistent_coverage");
-    if (!s.prospective[sub.id] || s.prospective[sub.id].gap_blocked) reasons.push("prospective_observation_gap_or_missing");
-    if (!(forwardPriors.global_observations! > 0)) reasons.push("no_forward_global_observations");
-    if (f.n < p.minimum_observations) reasons.push("insufficient_mature_observations");
-    if (f.k < p.minimum_engagements) reasons.push("insufficient_engagements");
-    if (f.benchmark >= 1) reasons.push("benchmark_unreachable");
+    if (!selected.volume_complete || !selected.engagement_complete) reasons.push("incomplete_or_inconsistent_coverage");
+    if (provisional) {
+      if (Date.now() - s.started_at > 7 * DAY) reasons.push("snapshot_stale");
+      if (!(matureHistoricalPriors.global_observations! > 0)) reasons.push("no_mature_historical_global_observations");
+    } else {
+      if (!s.prospective[sub.id] || s.prospective[sub.id].gap_blocked) reasons.push("prospective_observation_gap_or_missing");
+      if (!(forwardPriors.global_observations! > 0)) reasons.push("no_forward_global_observations");
+    }
+    if (selected.n < p.minimum_observations) reasons.push("insufficient_mature_observations");
+    if (selected.k < p.minimum_engagements) reasons.push("insufficient_engagements");
+    if (selected.benchmark >= 1) reasons.push("benchmark_unreachable");
     if (pref?.exclude) reasons.push("excluded");
     const evidenceEligible = reasons.length === 0;
     if (p.promotion_probability === null) reasons.push("uncalibrated_probability");
-    else if (f.probability_above === null || f.probability_above < p.promotion_probability) reasons.push("below_probability_cutoff");
+    else if (selected.probability_above === null || selected.probability_above < p.promotion_probability) reasons.push("below_probability_cutoff");
     const newest = s.newest_item_timestamps?.[sub.id] ?? s.volumes[sub.id]?.articles.reduce((max, a) => Math.max(max, a.timestamp), 0) ?? 0;
     return { stream_id: sub.id, title: sub.title, folders: sub.categories.map(c => c.label), url: sub.url, html_url: sub.htmlUrl,
       member: s.membership.includes(sub.id), current_member: d.membership?.ids.includes(sub.id) ?? null,
@@ -56,12 +72,12 @@ export function evaluateSnapshot(p: PriorityProfile, s: PrioritySnapshot, d: Dec
       first_observed: s.prospective[sub.id]?.first_observed ?? d.observations[sub.id]?.first_observed ?? null,
       last_complete_observation: s.volumes[sub.id]?.observed_at ?? null,
       gap_blocked: s.prospective[sub.id]?.gap_blocked ?? null,
-      historical: h, prospective: f, evidence_eligible: evidenceEligible, qualifies: reasons.length === 0, reasons,
+      historical: h, prospective: f, promotion_evidence: promotionEvidence, evidence_eligible: evidenceEligible, qualifies: reasons.length === 0, reasons,
       newest_item_date: newest > 0 ? new Date(newest).toISOString() : null,
       days_since_newest: newest > 0 ? Math.max(0, (s.started_at - newest) / DAY) : null,
     };
   });
-  return { rows, historical_priors: historicalPriors, prospective_priors: forwardPriors };
+  return { rows, historical_priors: historicalPriors, prospective_priors: forwardPriors, promotion_priors: provisional ? matureHistoricalPriors : forwardPriors };
 }
 export function previousWeekly(s: PrioritySnapshot, all: PrioritySnapshot[]): PrioritySnapshot | undefined {
   return all.filter(x => x.phase === "complete" && x.completed_at && x.config_hash === s.config_hash && x.started_at < s.started_at && Date.parse(weekKey(s.started_at)) - Date.parse(weekKey(x.started_at)) === 7 * DAY && s.started_at - x.started_at >= 6 * DAY && s.started_at - x.started_at <= 10 * DAY).sort((a, b) => b.started_at - a.started_at)[0];
@@ -74,19 +90,20 @@ export function policyReport(p: PriorityProfile, s: PrioritySnapshot, d: Decisio
     const twoWeekly = row.qualifies && old?.qualifies === true;
     const memberSince = d.membership?.since[row.stream_id];
     const removalEvidence = (r: typeof row) => !r.reasons.includes("config_mismatch") && !r.reasons.includes("snapshot_incomplete") && r.prospective.n >= p.minimum_observations && r.prospective.volume_complete && r.prospective.engagement_complete && r.gap_blocked === false && r.prospective.probability_above !== null && 1 - r.prospective.probability_above >= 0.8;
-    return { ...row, two_weekly_qualifying: twoWeekly, auto_add_candidate: twoWeekly && !row.current_member && !row.excluded,
+    const confirmed = p.promotion_mode === "provisional" ? row.qualifies : twoWeekly;
+    return { ...row, two_weekly_qualifying: twoWeekly, auto_add_candidate: confirmed && !row.current_member && !row.excluded,
       removal_suggestion: !!(row.current_member && !row.pinned && memberSince !== undefined && s.started_at - memberSince >= 30 * DAY && old && removalEvidence(row) && removalEvidence(old)),
-      reasons: [...row.reasons, ...(!twoWeekly ? ["requires_two_successive_complete_weekly_snapshots"] : [])],
+      reasons: [...row.reasons, ...(p.promotion_mode !== "provisional" && !twoWeekly ? ["requires_two_successive_complete_weekly_snapshots"] : [])],
     };
   });
-  const ranked = rows.filter(r => r.auto_add_candidate).sort((a, b) => b.prospective.probability_above! - a.prospective.probability_above! || b.prospective.k - a.prospective.k || a.stream_id.localeCompare(b.stream_id));
+  const ranked = rows.filter(r => r.auto_add_candidate).sort((a, b) => b.promotion_evidence.probability_above! - a.promotion_evidence.probability_above! || b.promotion_evidence.k - a.promotion_evidence.k || a.stream_id.localeCompare(b.stream_id));
   const spent = d.intents.filter(i => i.action === "auto_add" && i.status !== "not_applied" && i.week === weekKey(Date.now())).length;
   const snapshotSpent = d.intents.filter(i => i.action === "auto_add" && i.status !== "not_applied" && i.snapshot_id === s.id).length;
   const slots = Math.max(0, Math.min(5 - spent, 5 - snapshotSpent));
-  const cutoffSweep = [0.8, 0.85, 0.9, 0.95, 0.975, 0.99].map(cutoff => ({ probability: cutoff,
-    qualifying_feeds: rows.filter(r => r.evidence_eligible && r.prospective.probability_above! >= cutoff).length,
-    expected_posts_per_month: rows.filter(r => r.evidence_eligible && r.prospective.probability_above! >= cutoff).reduce((sum, r) => sum + r.historical.n / p.window_months, 0),
-    two_weekly_feeds: rows.filter(r => r.evidence_eligible && r.prospective.probability_above! >= cutoff && previousRows.some(old => old.stream_id === r.stream_id && old.evidence_eligible && old.prospective.probability_above! >= cutoff)).length,
+  const cutoffSweep = [0.8, 0.85, 0.9, 0.95, 0.975, 0.99].map(cutoff => ({ probability: cutoff, basis: p.promotion_mode === "provisional" ? "mature_historical" as const : "prospective" as const,
+    qualifying_feeds: rows.filter(r => r.evidence_eligible && r.promotion_evidence.probability_above! >= cutoff).length,
+    expected_posts_per_month: rows.filter(r => r.evidence_eligible && r.promotion_evidence.probability_above! >= cutoff).reduce((sum, r) => sum + r.historical.n / p.window_months, 0),
+    two_weekly_feeds: rows.filter(r => r.evidence_eligible && r.promotion_evidence.probability_above! >= cutoff && previousRows.some(old => old.stream_id === r.stream_id && old.evidence_eligible && old.promotion_evidence.probability_above! >= cutoff)).length,
   }));
   return { ...evaluated, rows: rows.map(r => ({ ...r, queued: r.auto_add_candidate && !ranked.slice(0, slots).some(x => x.stream_id === r.stream_id) })), ranked_ids: ranked.slice(0, slots).map(r => r.stream_id), weekly_additions_reserved: spent, snapshot_additions_reserved: snapshotSpent, weekly_slots: slots, cutoff_sweep: cutoffSweep };
 }

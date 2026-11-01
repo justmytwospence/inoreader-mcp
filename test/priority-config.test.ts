@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  configHash, excludedFolders, loadPriorityConfig, parsePriorityConfig, priorityProfile,
+  configHash, excludedFolders, isPromotionReviewed, loadPriorityConfig, parsePriorityConfig, priorityProfile,
   type PriorityProfile,
 } from "../src/priority/config.js";
 
@@ -21,6 +21,19 @@ const reviewed = (profile: PriorityProfile, probability = 0.95) => ({
   promotion_probability: probability,
   calibration: {
     reviewed: true as const,
+    config_hash: configHash(profile),
+    promotion_probability: probability,
+    reviewed_at: "2026-01-01T00:00:00.000Z",
+  },
+});
+
+const provisionalReviewed = (profile: PriorityProfile, probability = 0.95) => ({
+  ...profile,
+  promotion_mode: "provisional" as const,
+  auto_add_enabled: true,
+  promotion_probability: probability,
+  provisional_review: {
+    acknowledged_uncalibrated: true as const,
     config_hash: configHash(profile),
     promotion_probability: probability,
     reviewed_at: "2026-01-01T00:00:00.000Z",
@@ -87,6 +100,7 @@ test("minimal profiles default to conservative evidence requirements and disable
     maturation_days: 7,
     absolute_benchmark_floor: 0.2,
     topic_multiplier: 2,
+    promotion_mode: "calibrated",
     promotion_probability: null,
     auto_add_enabled: false,
   });
@@ -106,6 +120,7 @@ for (const [field, values] of Object.entries({
   prior_strength: [0, -1, Infinity],
   window_months: [0, 61, 1.5],
   promotion_probability: [0, 1],
+  promotion_mode: ["automatic", "Calibrated", null],
 })) {
   test(`validation rejects unsafe ${field} values`, () => {
     for (const value of values) assert.throws(() => parseProfile({ [field]: value }), new RegExp(field));
@@ -136,6 +151,15 @@ test("activation requires reviewed calibration matching both the model hash and 
   const base = parseProfile();
   const valid = reviewed(base);
   assert.deepEqual(parseProfile(valid), valid);
+  assert.equal(isPromotionReviewed(valid), true);
+  assert.equal(isPromotionReviewed(reviewed(base, 0.9)), true, "the provisional floor does not change calibrated review");
+  assert.equal(isPromotionReviewed(base), false);
+  assert.equal(isPromotionReviewed({ ...valid, calibration: undefined }), false);
+  const { promotion_mode: _mode, ...legacy } = valid;
+  assert.deepEqual(parseProfile(legacy), valid, "existing reviewed profiles still default to calibrated");
+  assert.throws(() => parseProfile({ auto_add_enabled: true }), {
+    message: "Auto-add requires reviewed calibration matching model config hash and probability",
+  });
   const invalid = [
     { ...valid, calibration: undefined },
     { ...valid, promotion_probability: null },
@@ -150,11 +174,63 @@ test("activation requires reviewed calibration matching both the model hash and 
   assert.equal(parseProfile({ promotion_probability: 0.95 }).auto_add_enabled, false);
 });
 
-test("config hashes are stable across activation flags, promotion probabilities, and calibration metadata", () => {
+test("provisional activation requires explicit matching uncalibrated review and a 0.95 floor", () => {
+  const base = parseProfile();
+  const valid = provisionalReviewed(base);
+  for (const probability of [0.95, 0.99]) {
+    const p = provisionalReviewed(base, probability);
+    assert.deepEqual(parseProfile(p), p);
+    assert.equal(isPromotionReviewed(p), true);
+  }
+  const invalid = [
+    { ...valid, provisional_review: undefined },
+    { ...valid, promotion_probability: null },
+    { ...valid, provisional_review: { ...valid.provisional_review, config_hash: "0".repeat(64) } },
+    { ...valid, provisional_review: { ...valid.provisional_review, promotion_probability: 0.96 } },
+    { ...valid, minimum_observations: 21 },
+    provisionalReviewed(base, 0.949999),
+  ];
+  for (const p of invalid) {
+    assert.equal(isPromotionReviewed(p), false);
+    assert.throws(() => parseProfile(p), /Auto-add requires explicit uncalibrated provisional review/);
+    assert.equal(parseProfile({ ...p, auto_add_enabled: false }).auto_add_enabled, false);
+  }
+  for (const review of [
+    { ...valid.provisional_review, acknowledged_uncalibrated: false },
+    { ...valid.provisional_review, acknowledged_uncalibrated: undefined },
+    { ...valid.provisional_review, config_hash: "not a hash" },
+    { ...valid.provisional_review, promotion_probability: 1 },
+    { ...valid.provisional_review, reviewed_at: "not a date" },
+    { ...valid.provisional_review, extra: true },
+  ]) assert.throws(() => parseProfile({ ...valid, provisional_review: review }), /provisional_review/);
+});
+
+test("review authorization follows the selected mode rather than the other mode's review", () => {
+  const base = parseProfile();
+  const calibratedOnly = { ...reviewed(base), promotion_mode: "provisional" as const };
+  const provisionalOnly = { ...provisionalReviewed(base), promotion_mode: "calibrated" as const };
+  for (const p of [calibratedOnly, provisionalOnly]) {
+    assert.equal(isPromotionReviewed(p), false);
+    assert.throws(() => parseProfile(p), /Auto-add requires/);
+  }
+  assert.equal(isPromotionReviewed({ ...calibratedOnly, provisional_review: provisionalReviewed(base).provisional_review }), true);
+  assert.equal(isPromotionReviewed({ ...provisionalOnly, calibration: reviewed(base).calibration }), true);
+  assert.equal(isPromotionReviewed({ ...calibratedOnly, provisional_review: provisionalReviewed(base, 0.9).provisional_review }), false);
+});
+
+test("config hashes are stable across activation flags, promotion modes, probabilities, and review metadata", () => {
   const base = parseProfile();
   const hash = configHash(base);
-  assert.match(hash, /^[a-f0-9]{64}$/);
+  assert.equal(hash, "e5b64dcaba0cb5cef76781de2419582724fa0147092d471b7d96ff14f9dda736", "pre-mode default model hash must remain exact");
+  assert.equal(configHash(parseProfile({ window_months: 6 })), "9dcba8347e097b36432ef94a667a75787c2f2322e57eb86b1b8d1df510a0221a");
   assert.equal(configHash(parseProfile()), hash);
+  assert.equal(configHash({ ...base, promotion_mode: "provisional" }), hash);
+  assert.equal(configHash(parseProfile(provisionalReviewed(base))), hash);
+  assert.equal(configHash({ ...provisionalReviewed(base), provisional_review: undefined }), hash);
+  assert.equal(configHash({
+    ...provisionalReviewed(base, 0.99),
+    provisional_review: { ...provisionalReviewed(base, 0.99).provisional_review, reviewed_at: "2026-02-01T00:00:00.000Z" },
+  }), hash);
   assert.equal(configHash({ ...base, auto_add_enabled: true }), hash);
   assert.equal(configHash(reviewed(base)), hash);
   assert.equal(configHash(reviewed(base, 0.9)), hash);

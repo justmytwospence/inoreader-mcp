@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { apiGet, apiPost } from "../api.js";
 import { assertBudget } from "../rate-limit.js";
+import { migratePriorityFeed } from "../priority/tools.js";
 import { jsonResult } from "../contracts.js";
 import {
   COMMON_FEED_PATHS,
@@ -194,6 +195,9 @@ export function registerRepairTools(server: McpServer): void {
         return text({ error: "the new subscription did not land as asked; the old one was kept", new_stream_id: newId, missing_folders: missing }, true);
       }
 
+      // Migrate durable priority preferences after verifying the replacement, but
+      // before removing the old ID. A persistence failure keeps the old feed.
+      await migratePriorityFeed(old.id, newId);
       await apiPost<string>("/reader/api/0/subscription/edit", { ac: "unsubscribe", s: old.id }, undefined, { expectOk: true });
       const gone = !(await listSubscriptions()).some((s) => s.id === old.id);
       return text(

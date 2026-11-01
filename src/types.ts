@@ -92,8 +92,18 @@ export interface StreamItemContentsResponse {
   items: ArticleItem[];
 }
 
+export type LabelType = "folder" | "tag" | "active_search" | "state" | "unknown";
+
+export interface InoreaderLabel {
+  id: string;
+  sortid?: string;
+  type?: string;
+  unread_count?: number | string;
+  unseen_count?: number | string;
+}
+
 export interface TagListResponse {
-  tags: Array<{ id: string; sortid?: string; type?: string }>;
+  tags: InoreaderLabel[];
 }
 
 export interface UserInfoResponse {

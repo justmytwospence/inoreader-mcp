@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 import { apiGet } from "../api.js";
 import { jsonResult } from "../contracts.js";
 import { assertBudget } from "../rate-limit.js";
+import { betaQuantile } from "../statistics/beta.js";
 import type {
   ArticleItem,
   StreamContentsResponse,
@@ -11,85 +12,6 @@ import type {
 // ---------------------------------------------------------------------------
 // Math helpers (no external deps; mirrors inline-math convention from analytics.ts)
 // ---------------------------------------------------------------------------
-
-// Lanczos approximation (g=5, n=6) to log(Gamma(x)) for x > 0
-function lgamma(x: number): number {
-  const cof = [
-    76.18009172947146, -86.50532032941677, 24.01409824083091,
-    -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5,
-  ];
-  let y = x;
-  const tmp = x + 5.5;
-  const s = (x + 0.5) * Math.log(tmp) - tmp;
-  let ser = 1.000000000190015;
-  for (const c of cof) {
-    y += 1;
-    ser += c / y;
-  }
-  return s + Math.log((2.5066282746310005 * ser) / x);
-}
-
-// Continued fraction expansion for I_x(a, b). Lentz's method.
-function betaCf(x: number, a: number, b: number): number {
-  const MAXIT = 200;
-  const EPS = 3e-12;
-  const FPMIN = 1e-300;
-  const qab = a + b;
-  const qap = a + 1;
-  const qam = a - 1;
-  let c = 1;
-  let d = 1 - (qab * x) / qap;
-  if (Math.abs(d) < FPMIN) d = FPMIN;
-  d = 1 / d;
-  let h = d;
-  for (let m = 1; m <= MAXIT; m++) {
-    const m2 = 2 * m;
-    let aa = (m * (b - m) * x) / ((qam + m2) * (a + m2));
-    d = 1 + aa * d;
-    if (Math.abs(d) < FPMIN) d = FPMIN;
-    c = 1 + aa / c;
-    if (Math.abs(c) < FPMIN) c = FPMIN;
-    d = 1 / d;
-    h *= d * c;
-    aa = (-(a + m) * (qab + m) * x) / ((a + m2) * (qap + m2));
-    d = 1 + aa * d;
-    if (Math.abs(d) < FPMIN) d = FPMIN;
-    c = 1 + aa / c;
-    if (Math.abs(c) < FPMIN) c = FPMIN;
-    d = 1 / d;
-    const del = d * c;
-    h *= del;
-    if (Math.abs(del - 1) < EPS) break;
-  }
-  return h;
-}
-
-// Regularized incomplete beta function I_x(a, b) = Beta CDF
-function betaCdf(x: number, a: number, b: number): number {
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  const lbt =
-    lgamma(a + b) - lgamma(a) - lgamma(b) + a * Math.log(x) + b * Math.log(1 - x);
-  const bt = Math.exp(lbt);
-  if (x < (a + 1) / (a + b + 2)) {
-    return (bt * betaCf(x, a, b)) / a;
-  }
-  return 1 - (bt * betaCf(1 - x, b, a)) / b;
-}
-
-// Inverse Beta CDF via bisection (60 iters → ~1e-18 precision)
-function betaQuantile(q: number, a: number, b: number): number {
-  if (q <= 0) return 0;
-  if (q >= 1) return 1;
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 60; i++) {
-    const mid = (lo + hi) / 2;
-    if (betaCdf(mid, a, b) < q) lo = mid;
-    else hi = mid;
-  }
-  return (lo + hi) / 2;
-}
 
 // Marsaglia-Tsang gamma sampler (shape >= 1; recursive boost for shape < 1)
 function sampleStdNormal(): number {
@@ -519,7 +441,7 @@ interface CalibrationResult {
   }>;
   ece: number;
   total_n: number;
-  prior: { alpha: number; beta: number; rate: number; strength: number };
+  prior: { alpha: number; beta: number; rate: number; strength: number; boundary_stabilized: boolean };
 }
 
 function computeCalibration(
@@ -540,7 +462,10 @@ function computeCalibration(
   // Empirical-Bayes prior from the marginal worth-it rate on this slice
   const k_total = eligible.filter((r) => r.label === "worth-it").length;
   const n_total = eligible.length;
-  const rate = n_total > 0 ? k_total / n_total : 0.5;
+  const boundaryStabilized = n_total > 0 && (k_total === 0 || k_total === n_total);
+  const rate = boundaryStabilized
+    ? (k_total + 0.5) / (n_total + 1)
+    : n_total > 0 ? k_total / n_total : 0.5;
   const alpha0 = rate * priorStrength;
   const beta0 = (1 - rate) * priorStrength;
 
@@ -624,6 +549,7 @@ function computeCalibration(
       beta: round4(beta0),
       rate: round4(rate),
       strength: priorStrength,
+      boundary_stabilized: boundaryStabilized,
     },
   };
 }

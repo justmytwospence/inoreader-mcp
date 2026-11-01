@@ -4,6 +4,7 @@ import { apiGet, apiPost } from "./api.js";
 import { assertBudget } from "./rate-limit.js";
 import { USAGE_GUIDE } from "./guidance.js";
 import { normalizeItemId } from "./verify-tags.js";
+import { labelType } from "./labels.js";
 import { snapshot } from "./rate-limit.js";
 import type {
   SubscriptionListResponse,
@@ -114,7 +115,7 @@ export function registerResources(server: McpServer): void {
     async (uri) => {
       assertBudget(1, 2, "folders resource");
       const [tagData, subData] = await Promise.all([
-        apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json" }),
+        apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json", types: "1" }),
         apiGet<SubscriptionListResponse>("/reader/api/0/subscription/list", {
           output: "json",
         }),
@@ -129,7 +130,7 @@ export function registerResources(server: McpServer): void {
       }
 
       const folders = tagData.tags
-        .filter((t) => folderIds.has(t.id))
+        .filter((t) => labelType(t, folderIds) === "folder")
         .map((t) => {
           const label = t.id.replace(/^user\/[^/]+\/label\//, "");
           const feedCount = subData.subscriptions.filter((s) =>
@@ -139,8 +140,8 @@ export function registerResources(server: McpServer): void {
         });
 
       const tags = tagData.tags
-        .filter((t) => !folderIds.has(t.id))
-        .map((t) => ({ id: t.id, type: t.type }));
+        .filter((t) => labelType(t, folderIds) !== "folder")
+        .map((t) => ({ id: t.id, type: labelType(t, folderIds) }));
 
       return {
         contents: [

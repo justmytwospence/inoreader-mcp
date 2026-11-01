@@ -82,6 +82,7 @@ older session-based clients alike. Running as a service adds two things a stdio 
 | `PORT` | `8000` | HTTP port |
 | `MCP_ALLOWED_HOSTS` | (any) | Comma-separated hostnames allowed in the `Host` header (set it behind a reverse proxy) |
 | `INOREADER_TASTE_INDEX` | (off) | `on` enables the [taste index](#taste-index) and its four tools |
+| `INOREADER_PRIORITY_CONFIG` | (unset) | JSON configuration enabling the [feed-priority tools](#feed-priority) in single-process HTTP mode |
 | `INOREADER_TASTE_CONFIG` | (built-in: starred + highlights) | Path of the JSON file naming the index's sources and tiers |
 | `INOREADER_TASTE_MODEL_DIR` | (download on first use; `/app/models` in the image) | Directory holding the embedding model files, so nothing is downloaded |
 | `INOREADER_TASTE_THREADS` | `1` | ONNX threads for the embedding model |
@@ -230,6 +231,76 @@ from its 420 MB peak to between 115 and 165 MB, against a baseline of 45 to 80 M
 allocator slack, which `MALLOC_TRIM_THRESHOLD_` in the image keeps small). A 1 GB memory limit is a comfortable ceiling; one CPU and `INOREADER_TASTE_THREADS=1`
 are enough.
 
+## Feed priority
+
+An optional, **single-process HTTP-only** feature for maintaining a folder of priority
+sources. Set `INOREADER_PRIORITY_CONFIG` to a JSON file of named profiles. Without it,
+no priority tools or local priority state are loaded; existing tools remain available.
+A profile configures its folder, explicit positive streams, excluded topic folders,
+Bayesian evidence requirements and calibration policy. Folder membership is additive:
+feeds keep their existing topic folders. A minimal shadow configuration is:
+
+```json
+{
+  "profiles": [{
+    "name": "priority",
+    "folder": "Priority",
+    "positive_streams": ["user/-/state/com.google/starred"],
+    "excluded_topic_folders": ["Priority"],
+    "auto_add_enabled": false,
+    "promotion_probability": null
+  }]
+}
+```
+
+Defaults are a 12-month historical window, strength-10 priors, 20 mature observations,
+five positive engagements, seven maturation days, and the benchmark
+`max(0.20, 2 * topic_baseline)`. Add only actual positive article-tag streams to the
+allowlist; collection verifies their type. With `MCP_TRANSPORT=http` and
+`INOREADER_PRIORITY_CONFIG` pointing to the file, start explicitly using
+`refresh_feed_priority({profile: "priority", start_new: true})`, then resume by the
+returned `snapshot_id`. `get_feed_priority({profile: "priority"})` reads local status.
+These operations collect evidence but do not populate the folder.
+
+The signal is **explicit starred/tagged engagement**, not the ordinary read flag.
+Operational folders, automated recommendation tags and negative feedback are not positive
+signals. Historical rates describe retrievable history: retention and unknown subscription
+dates can bias them. Automatic additions instead require complete, mature forward-observed
+evidence and exact category-pooled Beta–Binomial posterior probabilities.
+
+| Tool | Purpose | API cost |
+|------|---------|----------|
+| `refresh_feed_priority` | Start explicitly or resume a named evidence snapshot; checkpoint each page. Mutates local state, never Inoreader membership. | Default 25, maximum 50 base Z1 reads/call; retries extra |
+| `get_feed_priority` | Read local evidence, coverage, calibration and durable decisions, with pagination. | 0 |
+| `manage_feed_priority` | Apply an enabled policy's guarded `auto_add`, or explicit human `pin`, `exclude`, `allow`, `remove` decisions. | Local decisions cost 0; membership operations use fresh reads and verified writes |
+
+A newly configured profile starts in **shadow mode**: automatic additions are disabled,
+there is no default promotion-confidence cutoff, and no membership is seeded. Compare
+cutoff sweeps and held-out posterior-predictive checks before reviewing and explicitly
+enabling a policy. A posterior probability is not itself evidence of empirical calibration.
+Missing, stale, partial or retention-inconsistent evidence cannot authorize additions.
+
+There is **no automatic removal or unsubscribe action**. Removal suggestions are advisory;
+`pin` and `remove` require the user's explicit instruction. `remove` means removal from the
+configured folder only. A durable exclusion is recorded before the remote edit, so the
+next scan cannot silently add the source back. Pins, exclusions, pending outcomes and
+replacement identities live in `<INOREADER_CONFIG_DIR>/priorities/`, shared by clients.
+A malformed preference file fails closed rather than discarding the user's decisions.
+
+Snapshots are explicit local records with collection timestamps, coverage and configuration
+identity. Status and calibration load the most recent eight completed weekly snapshots plus
+explicitly requested or active evidence; older snapshots remain on disk and can be read by ID.
+This bounds the working set without deleting user decisions or archived evidence.
+Snapshots do not restore the hidden response caching once removed from ordinary API
+reads. An ambiguous membership edit is reconciled from server state before another write;
+never blindly replay a timed-out edit. Manual membership changes between observations can
+only be detected when a subsequent complete read observes them; a remove-and-readd entirely
+between reads leaves no API history to reconstruct.
+
+Run a configured feature behind one HTTP process, not independent stdio writers or replicas.
+The profile/decision gates are safeguards, not a separate authentication boundary: MCP tool
+annotations and a client's claim of human approval are not proof of authorization.
+
 ## Resources
 
 Context that MCP clients can read directly without tool calls.
@@ -334,7 +405,7 @@ The `keep` tag (via `manage_tags add_tag='keep'`) protects a page from cleanup w
 
 **Z1** = Zone 1 (read), **Z2** = Zone 2 (write). Costs above are base requests;
 safe-read retries are additional attempts. Read `inoreader://usage` and
-`get_rate_limit_status` before expensive work. All 29 tools (33 with the taste index on) explicitly declare all
+`get_rate_limit_status` before expensive work. All 29 default tools (33 with the taste index, plus three when feed priority is configured) explicitly declare all
 four safety hints; these are advisory, not authorization or approval enforcement.
 JSON text results are preserved alongside structured data (legacy top-level arrays
 appear under `structuredContent.items`). Output schemas are declared and validated

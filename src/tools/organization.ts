@@ -4,6 +4,7 @@ import { apiGet, apiPost } from "../api.js";
 import { applyTagIntents, type TagIntent } from "../verify-tags.js";
 import { DateInput, jsonResult } from "../contracts.js";
 import { assertBudget } from "../rate-limit.js";
+import { labelType } from "../labels.js";
 import type { TagListResponse, UnreadCountResponse } from "../types.js";
 
 const SYSTEM_TAGS: Record<string, string> = {
@@ -134,7 +135,7 @@ export function registerOrganizationTools(server: McpServer): void {
   server.registerTool("list_folders_and_tags", { title: "List folders and tags", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "List all folders, tags, and labels with their unread counts. Only unread_count is available here; counts including read items require separate paginated get_article_ids calls per tag (1 extra Zone 1 request per IDs page, at most 10000 IDs/page). Costs 2 Zone 1 requests. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({}) }, async () => {
               assertBudget(1, 2, "list_folders_and_tags");
               const [tags, unreadData] = await Promise.all([
-                apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json" }),
+                apiGet<TagListResponse>("/reader/api/0/tag/list", { output: "json", types: "1", counts: "1" }),
                 apiGet<UnreadCountResponse>("/reader/api/0/unread-count", {
                   output: "json",
                 }),
@@ -146,8 +147,8 @@ export function registerOrganizationTools(server: McpServer): void {
 
               const result = tags.tags.map((t) => ({
                 id: t.id,
-                type: t.type ?? "tag",
-                unread_count: unreadMap.get(t.id) ?? 0,
+                type: labelType(t),
+                unread_count: unreadMap.get(t.id) ?? t.unread_count ?? 0,
               }));
 
               return jsonResult(result);

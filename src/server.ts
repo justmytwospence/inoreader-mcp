@@ -9,6 +9,7 @@ import { registerAnalyticsTools } from "./tools/analytics.js";
 import { registerCalibrationTools } from "./tools/calibration.js";
 import { registerRepairTools } from "./tools/repair.js";
 import { registerTasteTools } from "./tools/taste.js";
+import { registerPriorityTools } from "./priority/tools.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
 import { SERVER_INSTRUCTIONS } from "./guidance.js";
@@ -88,6 +89,7 @@ export function createServer(): McpServer {
   registerCalibrationTools(server);
   registerRepairTools(server);
   registerTasteTools(server); // only when INOREADER_TASTE_INDEX=on
+  registerPriorityTools(server); // only when INOREADER_PRIORITY_CONFIG is configured
   registerResources(server);
   registerPrompts(server);
   return server;

@@ -3,7 +3,11 @@ import * as z from "zod/v4";
 import { apiGet } from "../api.js";
 import { assertBudget, snapshot, zoneRemaining } from "../rate-limit.js";
 import { jsonResult } from "../contracts.js";
+import { countEngagement, fitCategoryPriors, feedPosterior, type FeedCounts } from "../feed-analysis.js";
+import { normalizeTagId } from "../verify-tags.js";
+import { labelType } from "../labels.js";
 import type {
+  ArticleItem,
   SubscriptionListResponse,
   UnreadCountResponse,
   StreamContentsResponse,
@@ -13,8 +17,10 @@ import type {
 } from "../types.js";
 
 export function registerAnalyticsTools(server: McpServer): void {
-  server.registerTool("analyze_feeds", { title: "Analyze feeds", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Analyze feed health and engagement using a Beta-Binomial Bayesian model with category-level pooling. Default analyzes the last 12 months. Counts articles with any engagement signal (starred, liked, broadcast, or custom tags) as engaged, deduplicating across tags. Excludes passive system tags (read, reading-list, blogger-following, tracking-*). Computes engagement_rate as the posterior mean of engaged/total per feed, with an empirical Bayes prior estimated per folder category. Feeds in multiple folders average their category priors. Categories with fewer than 2 engaged feeds fall back to the global prior. This shrinks small-sample feeds toward their category mean, preventing feeds with 1/1 engaged from dominating. Feeds added partway through the window are slightly penalized (volume includes pre-subscription articles as 'skipped'), since Inoreader's API does not expose a reliable per-user subscription start date. Engagement pagination stops at the time window, per-tag engagement_pages cap, total max_requests cap, errors or known quota reserve; coverage is NOT exhaustive when capped/degraded. Missing engagement must not be treated as evidence of no interest. Also provides credible_lower (90% credible interval lower bound) for conservative ranking. Default sort is unengaged_per_month, which ranks feeds by estimated wasted articles per month ((1 - engagement_rate) * volume / months) to surface pruning candidates. Volume is only fetched when the sort metric needs it (engagement_rate, credible_lower, skipped, unengaged_per_month). Sorting by engaged_count, title, or days_since_newest skips volume counting entirely, saving ~1 API call per engaged feed. Costs 3 + (engagement pages until the window is exhausted, typically 10-30) [+ volume_feeds] Zone 1 requests EVERY call -- this is the most expensive tool here, and there is no caching between calls. Check get_rate_limit_status first on a large account. Base costs exclude safe-read retries (up to 4 attempts, each counted); honor cached status/cooldown. Never blindly replay uncertain writes. See inoreader://usage for limits, URI examples and prompts.", inputSchema: z.object({
+  server.registerTool("analyze_feeds", { title: "Analyze feeds", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }, description: "Analyze feed health and explicit engagement with a category-pooled Beta-Binomial model (default 12 months, prior strength 10). By default counts starred, liked, broadcast and custom tags, excluding folders and passive system states; engagement_streams selects an explicit positive allowlist. Ordinary read flags are not engagement. Articles are deduplicated across positive streams. Categories with fewer than two engaged feeds use the global prior; multiple actual topic priors are averaged, excluding exclude_topic_folders. Reports exact equal-tailed 90% Beta bounds and posterior shapes only for complete, consistent counts. Missing, capped or failed coverage is unknown, not zero engagement. Retained engagement can exceed retained feed volume: this is flagged without silently flooring the denominator. Historical rates are retention/subscription-affected context, never authorization for automatic actions. Engagement and volume follow continuations within max_requests and the known 25-read reserve. Default sort unengaged_per_month estimates wasted posting volume; skipped sorts ascending by total minus engaged. Sorting engaged_count, title or days_since_newest skips engaged-feed volume reads; volume_sample optionally counts never-engaged active feeds. Costs 3 metadata reads plus engagement pages and optional volume pages EVERY call; no caching. max_requests counts base calls including failed calls; safe-read retries are extra (up to 4 attempts, counted in rate-limit status). Check get_rate_limit_status before large scans. See inoreader://usage for limits and URI examples.", inputSchema: z.object({
               max_requests: z.number().int().min(3).max(500).optional().describe("Maximum base Zone 1 calls across this workflow (default 100); retries are extra. Leaves 25 known requests in reserve and reports partial coverage."),
+              engagement_streams: z.array(z.string().min(1)).optional().describe("Explicit positive stream IDs. Only these streams count as engagement; omit to retain the default explicit-action/custom-tag policy. Do not include negative or automation labels."),
+              exclude_topic_folders: z.array(z.string()).optional().describe("Folder names or IDs excluded from category pooling (for example an operational priority folder); memberships are preserved."),
               folder: z
                 .string()
                 .optional()
@@ -77,7 +83,7 @@ export function registerAnalyticsTools(server: McpServer): void {
                   output: "json",
                 }, { reserve: 25 }),
                 apiGet<TagListResponse>("/reader/api/0/tag/list", {
-                  output: "json",
+                  output: "json", types: "1",
                 }, { reserve: 25 }),
               ]);
 
@@ -88,53 +94,51 @@ export function registerAnalyticsTools(server: McpServer): void {
                   folderIds.add(cat.id);
                 }
               }
-              const excludedSuffixes = [
-                "state/com.google/read",
-                "state/com.google/reading-list",
-                "state/com.google/blogger-following",
-                "state/com.google/tracking-body-link-used",
-                "state/com.google/tracking-emailed",
-                "state/com.google/tracking-item-link-used",
-                "state/com.google/tracking-kept-unread",
-              ];
-              const engagementTagIds = tagData.tags
-                .map((t) => t.id)
+              const isPassive = (id: string) => id.includes("/state/com.google/") &&
+                !["starred", "like", "liked", "broadcast"].some((state) => id.endsWith("/state/com.google/" + state));
+              const normalizedFolders = new Set([...folderIds].map(normalizeTagId));
+              for (const tag of tagData.tags) {
+                if (tag.type === "folder") normalizedFolders.add(normalizeTagId(tag.id));
+              }
+              const availableTags = new Map(tagData.tags.map((tag) => [normalizeTagId(tag.id), tag]));
+              const unknownLabels = params.engagement_streams === undefined
+                ? tagData.tags.filter((tag) => labelType({ ...tag, id: normalizeTagId(tag.id) }, normalizedFolders) === "unknown") : [];
+              if (unknownLabels.length > 0) degraded.push("Unclassified labels were not trusted as positive streams; missing labels are NOT evidence of no engagement. Supply engagement_streams or authoritative tag types.");
+              const requestedStreams = params.engagement_streams ?? tagData.tags
+                .filter((tag) => ["tag", "state"].includes(labelType({ ...tag, id: normalizeTagId(tag.id) }, normalizedFolders)))
+                .map((tag) => tag.id);
+              const engagementTagIds = [...new Map(requestedStreams
                 .filter((id) => {
-                  if (folderIds.has(id)) return false;
-                  if (excludedSuffixes.some((suffix) => id.endsWith(suffix))) return false;
-                  return true;
-                });
+                  const normalized = normalizeTagId(id);
+                  const tag = availableTags.get(normalized);
+                  return !normalizedFolders.has(normalized) && !isPassive(id) &&
+                    (tag?.type === undefined || tag.type === "tag");
+                })
+                .map((id) => [normalizeTagId(id), id])).values()];
 
-              // Fetch engaged articles across all engagement tags with deduplication.
-              // Each tag paginates until either the ot time filter is exhausted
-              // (no continuation returned) or the per-tag safety cap is hit.
-              const engagedCountByFeed = new Map<string, number>();
-              const seenArticleIds = new Set<string>();
+              // A shared deduplicator sees every positive stream's in-window articles.
+              const engagedItems: ArticleItem[] = [];
               const perTagPageCap = params.engagement_pages ?? 100;
-              let totalEngaged = 0;
               let pagesUsed = 0;
-              let safetyCapHit = false;
+              let safetyCapHit = unknownLabels.length > 0;
               let z1Cost = 3; // subscriptions + unread counts + tag list
+              const canRead = () => {
+                const remaining = zoneRemaining(1).remaining;
+                return z1Cost < maxRequests && (remaining === null || remaining > 25);
+              };
 
               engagement: for (const tagId of engagementTagIds) {
                 let continuation: string | undefined;
-                let tagPages = 0;
-                let reachedWindowEdge = false;
-
-                while (tagPages < perTagPageCap) {
-                  const remaining = zoneRemaining(1).remaining;
-                  if (z1Cost >= maxRequests || (remaining !== null && remaining <= 25)) {
+                const seenCursors = new Set<string>();
+                let tagComplete = false;
+                for (let page = 0; page < perTagPageCap; page++) {
+                  if (!canRead()) {
                     degraded.push("Engagement scan stopped at workflow/known quota budget; unscanned tags are NOT evidence of no engagement.");
                     safetyCapHit = true;
                     break engagement;
                   }
-                  const queryParams: Record<string, string> = {
-                    output: "json",
-                    n: "100",
-                    ot: sinceTimestamp,
-                  };
+                  const queryParams: Record<string, string> = { output: "json", n: "100", ot: sinceTimestamp, r: "d" };
                   if (continuation) queryParams.c = continuation;
-
                   let data: StreamContentsResponse;
                   z1Cost++;
                   try {
@@ -148,32 +152,25 @@ export function registerAnalyticsTools(server: McpServer): void {
                     break;
                   }
                   pagesUsed++;
-                  tagPages++;
-
+                  let reachedWindowEdge = false;
                   for (const item of data.items) {
-                    // Defensive: stop if API ignored the ot filter and returned
-                    // articles older than the window.
                     const itemSec = parseInt(item.timestampUsec ?? "0", 10) / 1_000_000;
-                    if (itemSec > 0 && itemSec < globalSinceSec) {
-                      reachedWindowEdge = true;
-                      continue;
-                    }
-                    if (seenArticleIds.has(item.id)) continue;
-                    seenArticleIds.add(item.id);
-                    const feedId = item.origin?.streamId;
-                    if (feedId) {
-                      engagedCountByFeed.set(feedId, (engagedCountByFeed.get(feedId) ?? 0) + 1);
-                      totalEngaged++;
-                    }
+                    if (itemSec > 0 && itemSec < globalSinceSec) { reachedWindowEdge = true; continue; }
+                    engagedItems.push(item);
                   }
-
-                  if (reachedWindowEdge) break;
-                  if (!data.continuation) break;
+                  if (reachedWindowEdge || !data.continuation) { tagComplete = true; break; }
+                  if (seenCursors.has(data.continuation)) {
+                    degraded.push(`Engagement stream ${tagId} repeated a continuation; coverage is incomplete.`);
+                    break;
+                  }
                   continuation = data.continuation;
+                  seenCursors.add(continuation);
                 }
-
-                if (tagPages >= perTagPageCap) safetyCapHit = true;
+                if (!tagComplete) safetyCapHit = true;
               }
+              const engagementComplete = !safetyCapHit;
+              const engagedCountByFeed = countEngagement(engagedItems);
+              const totalEngaged = [...engagedCountByFeed.values()].reduce((sum, count) => sum + count, 0);
 
               // Build unread map for dormancy checks
               const unreadMap = new Map(
@@ -186,178 +183,100 @@ export function registerAnalyticsTools(server: McpServer): void {
                 ])
               );
 
-              // Helper to fetch article count for a single feed in the window
+              // A page length is not a total. Retain observed counts, but only
+              // declare a denominator complete after exhausting its continuation.
               const totalArticlesByFeed = new Map<string, number>();
-
+              const volumeCompleteByFeed = new Map<string, boolean>();
               async function countFeedArticles(feedId: string): Promise<void> {
-                try {
-                  assertBudget(1, 1, "analyze_feeds volume", 25);
-                  z1Cost++;
-                  const data = await apiGet<StreamItemIdsResponse>(
-                    "/reader/api/0/stream/items/ids",
-                    {
-                      s: feedId,
-                      ot: sinceTimestamp,
-                      n: "10000",
-                      output: "json",
-                    }, { reserve: 25 }
-                  );
-                  if (data.continuation) degraded.push(`Volume for ${feedId} is capped at 10000 IDs; ranking is approximate.`);
-                  const apiCount = (data.itemRefs ?? []).length;
-                  const engaged = engagedCountByFeed.get(feedId) ?? 0;
-                  // Floor at engaged count: engaged items survive Inoreader's purge
-                  // longer than the feed stream, so the API can undercount
-                  totalArticlesByFeed.set(feedId, Math.max(apiCount, engaged));
-                } catch (e) {
-                  degraded.push(`Volume unavailable for ${feedId}: ${String(e)}`);
+                const ids = new Set<string>();
+                const cursors = new Set<string>();
+                let continuation: string | undefined;
+                volumeCompleteByFeed.set(feedId, false);
+                while (canRead()) {
+                  try {
+                    assertBudget(1, 1, "analyze_feeds volume", 25);
+                    const query: Record<string, string> = { s: feedId, ot: sinceTimestamp, n: "10000", output: "json" };
+                    if (continuation) query.c = continuation;
+                    z1Cost++;
+                    const data = await apiGet<StreamItemIdsResponse>("/reader/api/0/stream/items/ids", query, { reserve: 25 });
+                    if (!Array.isArray(data.itemRefs)) throw new Error("Missing itemRefs; denominator unknown");
+                    for (const item of data.itemRefs) ids.add(item.id);
+                    totalArticlesByFeed.set(feedId, ids.size);
+                    if (!data.continuation) { volumeCompleteByFeed.set(feedId, true); return; }
+                    if (cursors.has(data.continuation)) throw new Error("Repeated volume continuation");
+                    continuation = data.continuation;
+                    cursors.add(continuation);
+                  } catch (e) {
+                    degraded.push(`Volume unavailable/incomplete for ${feedId}: ${String(e)}`);
+                    return;
+                  }
                 }
+                degraded.push(`Volume for ${feedId} incomplete at workflow/known quota budget; observed page lengths are not totals.`);
               }
 
-              // 1. Fetch volume for engaged feeds (only when sort needs it)
               const engagedFeedIds = [...engagedCountByFeed.keys()];
-              const BATCH_SIZE = 4;
               const sortBy = params.sort_by ?? "unengaged_per_month";
               const needsVolume = sortBy !== "engaged_count" && sortBy !== "title" && sortBy !== "days_since_newest";
-
-              // Volume counting is one Zone 1 request PER FEED and was previously uncapped:
-              // on a large account a single analyze_feeds call could eat the whole daily read
-              // budget by itself and leave every other tool failing for the rest of the day.
-              // Degrade loudly instead -- the ranking is weaker without volume, but a report
-              // that says so beats an exhausted budget nobody was told about.
-              const budgetFor = (requested: number): number => {
-                const want = Math.min(requested, Math.max(0, maxRequests - z1Cost));
-                if (want < requested) degraded.push(`Workflow request cap: skipped ${requested - want} volume reads.`);
-                const { remaining, source } = zoneRemaining(1);
-                if (remaining === null) return want; // nothing known; do not invent a limit
-                const spendable = Math.max(0, remaining - 25); // leave headroom for other tools
-                if (want <= spendable) return want;
-                degraded.push(
-                  `Zone 1 budget: wanted ${want} volume requests, ${remaining} remaining ` +
-                    `(per ${source}); counted ${spendable} and skipped ${want - spendable}. ` +
-                    `Ranking by volume is less reliable for the skipped feeds.`
-                );
-                return spendable;
-              };
-
+              // Sequential pagination admits every base call individually and
+              // prevents concurrent continuations from overrunning max_requests.
               if (needsVolume) {
-                const allowed = budgetFor(engagedFeedIds.length);
-                const todo = engagedFeedIds.slice(0, allowed);
-                for (let i = 0; i < todo.length; i += BATCH_SIZE) {
-                  const batch = todo.slice(i, i + BATCH_SIZE);
-                  await Promise.all(batch.map(countFeedArticles));
+                for (const feedId of engagedFeedIds) {
+                  if (!canRead()) {
+                    degraded.push("Workflow/known quota budget: skipped remaining volume reads; ranking is incomplete.");
+                    break;
+                  }
+                  await countFeedArticles(feedId);
                 }
               }
 
-              // 2. Optionally fetch volume for a sample of never-engaged active feeds
               const volumeSample = params.volume_sample ?? 0;
               if (volumeSample > 0) {
                 const now = Date.now();
-                const engagedFeedIdSet = new Set(engagedFeedIds);
                 const neverEngagedActive = subData.subscriptions
                   .filter((sub) => {
-                    if (engagedFeedIdSet.has(sub.id)) return false;
-                    const unread = unreadMap.get(sub.id);
-                    if (!unread?.newestItemTimestamp) return false;
-                    const daysSince = (now - unread.newestItemTimestamp) / (1000 * 60 * 60 * 24);
-                    return daysSince <= 90;
+                    if (engagedCountByFeed.has(sub.id)) return false;
+                    const newest = unreadMap.get(sub.id)?.newestItemTimestamp;
+                    return newest !== undefined && newest > 0 && (now - newest) / 86400000 <= 90;
                   })
-                  .sort((a, b) => {
-                    // Sort by most recently active first
-                    const aTime = unreadMap.get(a.id)?.newestItemTimestamp ?? 0;
-                    const bTime = unreadMap.get(b.id)?.newestItemTimestamp ?? 0;
-                    return bTime - aTime;
-                  })
-                  .slice(0, volumeSample)
-                  .map((sub) => sub.id);
-
-                const sampleAllowed = budgetFor(neverEngagedActive.length);
-                const sampleTodo = neverEngagedActive.slice(0, sampleAllowed);
-                for (let i = 0; i < sampleTodo.length; i += BATCH_SIZE) {
-                  const batch = sampleTodo.slice(i, i + BATCH_SIZE);
-                  await Promise.all(batch.map(countFeedArticles));
-                }
-              }
-
-              // Build category -> feed IDs mapping (feeds appear in ALL their categories)
-              const categoryFeedIds = new Map<string, string[]>();
-              for (const sub of subData.subscriptions) {
-                for (const cat of sub.categories) {
-                  if (!categoryFeedIds.has(cat.label)) categoryFeedIds.set(cat.label, []);
-                  categoryFeedIds.get(cat.label)!.push(sub.id);
-                }
-              }
-
-              // Compute global empirical Bayes prior (fallback)
-              const priorStrength = params.prior_strength ?? 10;
-              let globalEngaged = 0;
-              let globalTotal = 0;
-              for (const feedId of engagedFeedIds) {
-                const total = totalArticlesByFeed.get(feedId);
-                if (total !== undefined) {
-                  globalEngaged += engagedCountByFeed.get(feedId) ?? 0;
-                  globalTotal += total;
-                }
-              }
-              const globalRate = globalTotal > 0 ? globalEngaged / globalTotal : 0;
-              const globalAlpha = globalRate * priorStrength;
-              const globalBeta = (1 - globalRate) * priorStrength;
-
-              // Compute per-category priors (categories with >= 2 engaged feeds)
-              const minCategoryFeeds = 2;
-              const categoryPriors = new Map<string, { alpha: number; beta: number; rate: number; fallback: boolean }>();
-              const fallbackCategories: string[] = [];
-
-              for (const [category, feedIds] of categoryFeedIds) {
-                let catEngaged = 0;
-                let catTotal = 0;
-                let engagedFeedCount = 0;
-                for (const fid of feedIds) {
-                  const eng = engagedCountByFeed.get(fid);
-                  const tot = totalArticlesByFeed.get(fid);
-                  if (eng !== undefined && eng > 0 && tot !== undefined) {
-                    catEngaged += eng;
-                    catTotal += tot;
-                    engagedFeedCount++;
+                  .sort((a, b) => (unreadMap.get(b.id)?.newestItemTimestamp ?? 0) - (unreadMap.get(a.id)?.newestItemTimestamp ?? 0))
+                  .slice(0, volumeSample);
+                for (const sub of neverEngagedActive) {
+                  if (!canRead()) {
+                    degraded.push("Workflow/known quota budget: skipped remaining sampled volume reads.");
+                    break;
                   }
-                }
-                if (engagedFeedCount >= minCategoryFeeds && catTotal > 0) {
-                  const rate = catEngaged / catTotal;
-                  categoryPriors.set(category, {
-                    alpha: rate * priorStrength,
-                    beta: (1 - rate) * priorStrength,
-                    rate,
-                    fallback: false,
-                  });
-                } else {
-                  categoryPriors.set(category, {
-                    alpha: globalAlpha,
-                    beta: globalBeta,
-                    rate: globalRate,
-                    fallback: true,
-                  });
-                  fallbackCategories.push(category);
+                  await countFeedArticles(sub.id);
                 }
               }
 
-              // Resolve per-feed prior by averaging across all the feed's categories
-              const feedPriors = new Map<string, { alpha: number; beta: number }>();
-              for (const sub of subData.subscriptions) {
-                if (sub.categories.length === 0) {
-                  feedPriors.set(sub.id, { alpha: globalAlpha, beta: globalBeta });
-                  continue;
-                }
-                const priors = sub.categories
-                  .map((c) => categoryPriors.get(c.label))
-                  .filter((p): p is NonNullable<typeof p> => p !== undefined);
-                if (priors.length === 0) {
-                  feedPriors.set(sub.id, { alpha: globalAlpha, beta: globalBeta });
-                } else {
-                  feedPriors.set(sub.id, {
-                    alpha: priors.reduce((sum, p) => sum + p.alpha, 0) / priors.length,
-                    beta: priors.reduce((sum, p) => sum + p.beta, 0) / priors.length,
-                  });
-                }
-              }
+              const priorStrength = params.prior_strength ?? 10;
+              const topicKey = (folder: string) => normalizeTagId(folder).trim().toLowerCase();
+              const excludedTopics = new Set((params.exclude_topic_folders ?? []).map(topicKey));
+              const topicFolders = (sub: SubscriptionListResponse["subscriptions"][number]) => sub.categories
+                .filter((cat) => !excludedTopics.has(topicKey(cat.label)) && !excludedTopics.has(topicKey(cat.id)))
+                .map((cat) => cat.label);
+              const counts: FeedCounts[] = subData.subscriptions.map((sub) => ({
+                stream_id: sub.id,
+                folders: topicFolders(sub),
+                k: engagedCountByFeed.get(sub.id) ?? 0,
+                // Unobserved denominators are flagged incomplete, not admitted to pooling.
+                n: totalArticlesByFeed.get(sub.id) ?? 0,
+                volume_complete: volumeCompleteByFeed.get(sub.id) === true,
+                engagement_complete: engagementComplete,
+              }));
+              const priorReport = fitCategoryPriors(counts, [], priorStrength);
+              const globalAlpha = priorReport.global.alpha;
+              const globalBeta = priorReport.global.beta;
+              const globalRate = priorReport.global.rate;
+              const categoryPriors = new Map(Object.entries(priorReport.by_category));
+              const fallbackCategories = priorReport.fallback_categories;
+              const feedPriors = new Map(subData.subscriptions.map((sub) => {
+                const priors = topicFolders(sub).map((folder) => categoryPriors.get(folder)).filter((p) => p !== undefined);
+                return [sub.id, priors.length === 0 ? priorReport.global : {
+                  alpha: priors.reduce((sum, p) => sum + p.alpha, 0) / priors.length,
+                  beta: priors.reduce((sum, p) => sum + p.beta, 0) / priors.length,
+                }];
+              }));
 
               let feeds = subData.subscriptions.map((sub) => {
                 const unread = unreadMap.get(sub.id);
@@ -370,34 +289,16 @@ export function registerAnalyticsTools(server: McpServer): void {
                 const engagedCount = engagedCountByFeed.get(sub.id) ?? 0;
                 const totalArticles = totalArticlesByFeed.get(sub.id) ?? null;
 
-                // Beta-Binomial posterior mean (using category-averaged prior)
-                const prior = feedPriors.get(sub.id) ?? { alpha: globalAlpha, beta: globalBeta };
-                let engagementRate: number | null;
-                let credibleLower: number | null;
-                if (engagedCount > 0 && totalArticles !== null && totalArticles > 0) {
-                  const n = totalArticles;
-                  const posteriorAlpha = prior.alpha + engagedCount;
-                  const posteriorBeta = prior.beta + n - engagedCount;
-                  const posteriorN = posteriorAlpha + posteriorBeta;
-                  engagementRate = posteriorAlpha / posteriorN;
-                  // Normal approximation to 90% credible interval lower bound
-                  const variance = (posteriorAlpha * posteriorBeta) / (posteriorN * posteriorN * (posteriorN + 1));
-                  credibleLower = Math.max(0, engagementRate - 1.645 * Math.sqrt(variance));
-                } else if (engagedCount > 0) {
-                  // Engaged articles exist but total count fetch failed
-                  engagementRate = null;
-                  credibleLower = null;
-                } else if (totalArticles !== null) {
-                  // Volume known but zero engagement
-                  engagementRate = 0;
-                  credibleLower = 0;
-                } else {
-                  // No volume data (never-engaged, not sampled)
-                  engagementRate = 0;
-                  credibleLower = 0;
-                }
+                const volumeComplete = volumeCompleteByFeed.get(sub.id) === true;
+                const retentionAdjusted = totalArticles !== null && engagedCount > totalArticles;
+                if (retentionAdjusted) degraded.push(`Retained engagement exceeds observed volume for ${sub.id}; denominator was not floored and no posterior is reported.`);
+                const prior = feedPriors.get(sub.id) ?? priorReport.global;
+                const posterior = engagementComplete && volumeComplete && totalArticles !== null && !retentionAdjusted
+                  ? feedPosterior(engagedCount, totalArticles, prior) : null;
+                const engagementRate = posterior?.mean ?? null;
+                const credibleLower = posterior?.ci_low ?? null;
 
-                let status: "high-engagement" | "moderate-engagement" | "never-engaged" | "dormant";
+                let status: "high-engagement" | "moderate-engagement" | "never-engaged" | "dormant" | "unknown";
                 if (daysSinceNewest !== null && daysSinceNewest > 90) {
                   status = "dormant";
                 } else if (engagementRate !== null && engagementRate > 0.1) {
@@ -405,20 +306,29 @@ export function registerAnalyticsTools(server: McpServer): void {
                 } else if (engagedCount > 0) {
                   status = "moderate-engagement";
                 } else {
-                  status = "never-engaged";
+                  status = engagementComplete ? "never-engaged" : "unknown";
                 }
 
                 return {
                   title: sub.title,
                   id: sub.id,
                   folders: sub.categories.map((c) => c.label),
-                  engaged_count: engagedCount,
+                  engaged_count: engagedCount > 0 || engagementComplete ? engagedCount : null,
+                  observed_engaged_count: engagedCount,
                   total_articles: totalArticles,
+                  volume_complete: volumeComplete,
+                  engagement_complete: engagementComplete,
+                  retention_adjusted: retentionAdjusted,
+                  posterior_alpha: posterior?.alpha ?? null,
+                  posterior_beta: posterior?.beta ?? null,
+                  ci_low: posterior?.ci_low ?? null,
+                  ci_high: posterior?.ci_high ?? null,
+                  credible_upper: posterior?.ci_high ?? null,
                   engagement_rate: engagementRate !== null ? Math.round(engagementRate * 10000) / 10000 : null,
                   credible_lower: credibleLower !== null ? Math.round(credibleLower * 10000) / 10000 : null,
                   newest_item_date: newestItemDate,
                   days_since_newest: daysSinceNewest ? Math.round(daysSinceNewest) : null,
-                  skipped: totalArticles !== null ? totalArticles - engagedCount : null,
+                  skipped: posterior !== null && totalArticles !== null ? totalArticles - engagedCount : null,
                   unengaged_per_month: engagementRate !== null && totalArticles !== null
                     ? Math.round((1 - engagementRate) * totalArticles / monthsBack * 100) / 100
                     : null,
@@ -439,7 +349,7 @@ export function registerAnalyticsTools(server: McpServer): void {
               } else if (sortBy === "credible_lower") {
                 feeds.sort((a, b) => (b.credible_lower ?? -1) - (a.credible_lower ?? -1));
               } else if (sortBy === "engaged_count") {
-                feeds.sort((a, b) => b.engaged_count - a.engaged_count);
+                feeds.sort((a, b) => (b.engaged_count ?? -1) - (a.engaged_count ?? -1));
               } else if (sortBy === "skipped") {
                 feeds.sort((a, b) => (a.skipped ?? 9999) - (b.skipped ?? 9999));
               } else if (sortBy === "days_since_newest") {
@@ -455,10 +365,13 @@ export function registerAnalyticsTools(server: McpServer): void {
                 high_engagement: feeds.filter((f) => f.status === "high-engagement").length,
                 moderate_engagement: feeds.filter((f) => f.status === "moderate-engagement").length,
                 never_engaged: feeds.filter((f) => f.status === "never-engaged").length,
+                unknown: feeds.filter((f) => f.status === "unknown").length,
                 dormant: feeds.filter((f) => f.status === "dormant").length,
                 window_months: monthsBack,
                 engaged_articles_scanned: totalEngaged,
                 has_more_engaged: safetyCapHit,
+                engagement_complete: engagementComplete,
+                engagement_pages_used: pagesUsed,
                 engagement_tags_used: engagementTagIds.length,
                 engagement_tag_ids: engagementTagIds,
                 api_cost_z1: z1Cost,
@@ -467,19 +380,14 @@ export function registerAnalyticsTools(server: McpServer): void {
                 volume_feeds_counted: totalArticlesByFeed.size,
                 prior: {
                   strength: priorStrength,
-                  global_fallback: {
-                    alpha: Math.round(globalAlpha * 1000) / 1000,
-                    beta: Math.round(globalBeta * 1000) / 1000,
-                    rate: Math.round(globalRate * 10000) / 10000,
-                  },
+                  global_observations: priorReport.global_observations,
+                  global_stabilized: priorReport.global_stabilized,
+                  stabilized_categories: priorReport.stabilized_categories,
+                  global_fallback: { alpha: globalAlpha, beta: globalBeta, rate: globalRate },
                   by_category: Object.fromEntries(
                     [...categoryPriors.entries()]
-                      .filter(([, v]) => !v.fallback)
-                      .map(([k, v]) => [k, {
-                        alpha: Math.round(v.alpha * 1000) / 1000,
-                        beta: Math.round(v.beta * 1000) / 1000,
-                        rate: Math.round(v.rate * 10000) / 10000,
-                      }])
+                      .filter(([category]) => !fallbackCategories.includes(category))
+                      .map(([k, v]) => [k, { alpha: v.alpha, beta: v.beta, rate: v.rate }])
                   ),
                   fallback_categories: fallbackCategories,
                 },

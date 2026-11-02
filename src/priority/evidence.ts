@@ -119,7 +119,11 @@ export async function refreshEvidence(p: PriorityProfile, args: { start_new?: bo
         if (s.continuation) params.c = s.continuation;
         const signalPage = signals ? await get<StreamContentsResponse>(`/reader/api/0/stream/contents/${encodeURIComponent(id)}`, params) : null;
         const volumePage = signals ? null : await get<StreamItemIdsResponse>("/reader/api/0/stream/items/ids", params);
-        const items = signalPage?.items ?? volumePage?.itemRefs;
+        // Empty ID streams can use Inoreader's contents-style empty envelope.
+        // Accept only that exact empty shape, never a nonempty or error payload.
+        const emptyVolume = volumePage as unknown as { items?: unknown; direction?: unknown } | null;
+        const nativeEmptyVolume = !signals && !!emptyVolume && Array.isArray(emptyVolume.items) && emptyVolume.items.length === 0 && Object.keys(emptyVolume).every(key => key === "items" || key === "direction");
+        const items = signalPage?.items ?? volumePage?.itemRefs ?? (nativeEmptyVolume ? [] : undefined);
         const continuation = signalPage?.continuation ?? volumePage?.continuation;
         if (!Array.isArray(items)) throw new Error("Invalid article/ID response");
         const articles = items.map(item => {

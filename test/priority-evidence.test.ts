@@ -56,6 +56,41 @@ function mock(handler: (url: URL) => unknown, metadata: unknown = { unreadcounts
 }
 const streamId = (url: URL) => decodeURIComponent(url.pathname.split("/stream/contents/")[1] ?? "");
 
+test("native empty contents-style ID responses complete without inventing exposure", async () => {
+  const p = profile("native-empty-volume");
+  mock(url => {
+    if (url.pathname.endsWith("subscription/list")) return { subscriptions: [sub()] };
+    if (url.pathname.endsWith("tag/list")) return { tags: [{ id: tag, type: "tag" }] };
+    if (streamId(url) === tag) return { items: [article("Positive", Date.now() - DAY)] };
+    assert.ok(url.pathname.endsWith("stream/items/ids"));
+    return { items: [], direction: "ltr" };
+  });
+  const result = await refreshEvidence(p, { start_new: true });
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.progress.errors, []);
+  const snapshot = await readSnapshot(p.name, result.snapshot_id);
+  assert.equal(snapshot.volumes[feed].complete, true);
+  assert.deepEqual(snapshot.volumes[feed].articles, []);
+});
+
+test("nonempty alternate ID responses and error envelopes remain incomplete", async () => {
+  for (const [index, payload] of [
+    { items: [article("Unexpected", Date.now() - DAY)], direction: "ltr" },
+    { items: [], direction: "ltr", error: "upstream failure" },
+  ].entries()) {
+    const p = profile(`invalid-empty-volume-${index}`);
+    mock(url => {
+      if (url.pathname.endsWith("subscription/list")) return { subscriptions: [sub()] };
+      if (url.pathname.endsWith("tag/list")) return { tags: [{ id: tag, type: "tag" }] };
+      if (streamId(url) === tag) return { items: [article("Positive", Date.now() - DAY)] };
+      return payload;
+    });
+    const result = await refreshEvidence(p, { start_new: true });
+    assert.equal(result.complete, false);
+    assert.match(result.progress.errors.join(" "), /Invalid article\/ID response/);
+  }
+});
+
 test("native numeric and legacy string subscription timestamps checkpoint and resume", async () => {
   for (const firstitemmsec of [1790000000000, "1790000000000"]) {
     const p = profile(`native-metadata-${typeof firstitemmsec}`);
